@@ -1,0 +1,51 @@
+name: Backend CD - Deploy to Staging
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with: { creds: ${{ secrets.AZURE_CREDENTIALS }} }
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name:   ${{ secrets.AKS_CLUSTER }}
+
+      - name: Create staging ns
+        run: kubectl create namespace sit722-staging-${{ github.run_id }}
+
+      - name: Deploy DBs and services
+        run: |
+          NS=sit722-staging-${{ github.run_id }}
+          sed -i "s|<ACR_LOGIN_SERVER>|${{ secrets.ACR_LOGIN_SERVER }}|g" k8s/*.yaml
+          kubectl apply -n $NS -f k8s/databases.yaml
+          kubectl apply -n $NS -f k8s/product.yaml
+          kubectl apply -n $NS -f k8s/customer.yaml
+          kubectl apply -n $NS -f k8s/order.yaml
+
+      - name: Wait for pods
+        run: |
+          NS=sit722-staging-${{ github.run_id }}
+          for d in product-service customer-service order-service; do
+            kubectl rollout status deploy/$d -n $NS --timeout=180s || exit 1
+          done
+
+      - name: Health checks
+        run: |
+          NS=sit722-staging-${{ github.run_id }}
+          kubectl run curl --rm -i --tty --image=curlimages/curl -n $NS -- \
+            sh -c 'for u in product-service:8000/health customer-service:8000/health order-service:8000/health; do echo "GET $u"; curl -sf "http://$u"; echo; done'
+
+      - name: Teardown
+        if: always()
+        run: kubectl delete namespace sit722-staging-${{ github.run_id }}

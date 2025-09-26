@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Pod
+metadata: { name: product-db }
+spec:
+  containers:
+  - name: postgres
+    image: postgres:15-alpine
+    env:
+    - { name: POSTGRES_DB, value: "products" }
+    - { name: POSTGRES_USER, value: "postgres" }
+    - { name: POSTGRES_PASSWORD, value: "postgres" }
+    ports: [{ containerPort: 5432 }]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: order-db }
+spec:
+  containers:
+  - name: postgres
+    image: postgres:15-alpine
+    env:
+    - { name: POSTGRES_DB, value: "orders" }
+    - { name: POSTGRES_USER, value: "postgres" }
+    - { name: POSTGRES_PASSWORD, value: "postgres" }
+    ports: [{ containerPort: 5432 }]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: customer-db }
+spec:
+  containers:
+  - name: postgres
+    image: postgres:15-alpine
+    env:
+    - { name: POSTGRES_DB, value: "customers" }
+    - { name: POSTGRES_USER, value: "postgres" }
+    - { name: POSTGRES_PASSWORD, value: "postgres" }
+    ports: [{ containerPort: 5432 }]
