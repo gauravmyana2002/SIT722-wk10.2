@@ -31,49 +31,7 @@ jobs:
         run: |
           mkdir -p k8s
 
-          # Databases (simple Pods)
-          cat > k8s/databases.yaml <<'YAML'
-          apiVersion: v1
-          kind: Pod
-          metadata: { name: product-db }
-          spec:
-            containers:
-            - name: postgres
-              image: postgres:15-alpine
-              env:
-              - { name: POSTGRES_DB, value: "products" }
-              - { name: POSTGRES_USER, value: "postgres" }
-              - { name: POSTGRES_PASSWORD, value: "postgres" }
-              ports: [{ containerPort: 5432 }]
-          ---
-          apiVersion: v1
-          kind: Pod
-          metadata: { name: order-db }
-          spec:
-            containers:
-            - name: postgres
-              image: postgres:15-alpine
-              env:
-              - { name: POSTGRES_DB, value: "orders" }
-              - { name: POSTGRES_USER, value: "postgres" }
-              - { name: POSTGRES_PASSWORD, value: "postgres" }
-              ports: [{ containerPort: 5432 }]
-          ---
-          apiVersion: v1
-          kind: Pod
-          metadata: { name: customer-db }
-          spec:
-            containers:
-            - name: postgres
-              image: postgres:15-alpine
-              env:
-              - { name: POSTGRES_DB, value: "customers" }
-              - { name: POSTGRES_USER, value: "postgres" }
-              - { name: POSTGRES_PASSWORD, value: "postgres" }
-              ports: [{ containerPort: 5432 }]
-          YAML
-
-          # Product service
+          # Product service + DB
           cat > k8s/product.yaml <<YAML
           apiVersion: apps/v1
           kind: Deployment
@@ -99,11 +57,13 @@ jobs:
           metadata: { name: product-service }
           spec:
             selector: { app: product }
-            ports: [{ port: 8001, targetPort: 8000, name: http }]
+            ports:
+              - port: 8001
+                targetPort: 8000
             type: LoadBalancer
           YAML
 
-          # Customer service
+          # Customer service + DB
           cat > k8s/customer.yaml <<YAML
           apiVersion: apps/v1
           kind: Deployment
@@ -129,11 +89,13 @@ jobs:
           metadata: { name: customer-service }
           spec:
             selector: { app: customer }
-            ports: [{ port: 8003, targetPort: 8000, name: http }]
+            ports:
+              - port: 8002
+                targetPort: 8000
             type: LoadBalancer
           YAML
 
-          # Order service
+          # Order service + DB
           cat > k8s/order.yaml <<YAML
           apiVersion: apps/v1
           kind: Deployment
@@ -160,40 +122,48 @@ jobs:
           metadata: { name: order-service }
           spec:
             selector: { app: order }
-            ports: [{ port: 8002, targetPort: 8000, name: http }]
+            ports:
+              - port: 8003
+                targetPort: 8000
             type: LoadBalancer
           YAML
 
       - name: Apply manifests
         run: |
-          kubectl apply -n "$NS" -f k8s/databases.yaml
           kubectl apply -n "$NS" -f k8s/product.yaml
           kubectl apply -n "$NS" -f k8s/customer.yaml
           kubectl apply -n "$NS" -f k8s/order.yaml
 
-      - name: Wait for rollouts
+      - name: Wait for External IPs
         run: |
-          for d in product-service customer-service order-service; do
-            kubectl rollout status deploy/$d -n "$NS" --timeout=180s || exit 1
+          for i in {1..60}; do
+            PRODUCT_IP=$(kubectl get svc product-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+            CUSTOMER_IP=$(kubectl get svc customer-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+            ORDER_IP=$(kubectl get svc order-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+
+            if [ -n "$PRODUCT_IP" ] && [ -n "$CUSTOMER_IP" ] && [ -n "$ORDER_IP" ]; then
+              echo "All IPs ready!"
+              break
+            fi
+            echo "Waiting for LoadBalancer IPs... attempt $i"
+            sleep 5
           done
 
-      - name: Capture External IPs
-        id: get_ips
-        run: |
-          get_ip () { kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}'; }
-          echo "PRODUCT_IP=$(get_ip product-service)" >> $GITHUB_ENV
-          echo "ORDER_IP=$(get_ip order-service)" >> $GITHUB_ENV
-          echo "CUSTOMER_IP=$(get_ip customer-service)" >> $GITHUB_ENV
+          [ -n "$PRODUCT_IP" ] || { echo "::error::Product IP not found"; exit 1; }
+          [ -n "$CUSTOMER_IP" ]|| { echo "::error::Customer IP not found"; exit 1; }
+          [ -n "$ORDER_IP" ]   || { echo "::error::Order IP not found"; exit 1; }
 
-      - name: Print External IPs
-        run: |
-          echo "::notice:: Product Service IP:   $PRODUCT_IP:8001"
-          echo "::notice:: Order Service IP:     $ORDER_IP:8002"
-          echo "::notice:: Customer Service IP:  $CUSTOMER_IP:8003"
+          echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
+          echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
+          echo "ORDER_IP=$ORDER_IP" >> $GITHUB_ENV
 
-      - name: Health checks (external)
+      - name: Health checks
         run: |
           for u in "http://${PRODUCT_IP}:8001/health" "http://${CUSTOMER_IP}:8002/health" "http://${ORDER_IP}:8003/health"; do
-          echo "GET $u"
-          curl -sf "$u" || exit 1
+            echo "GET $u"
+            curl -sf "$u" || exit 1
           done
+
+      - name: Teardown
+        if: always()
+        run: kubectl delete namespace "$NS"
