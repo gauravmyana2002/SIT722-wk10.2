@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: product-service }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: product } }
+  template:
+    metadata: { labels: { app: product } }
+    spec:
+      containers:
+      - name: product-service
+        image: <ACR_LOGIN_SERVER>/product_service:latest
+        ports: [{ containerPort: 8000 }]
+        env:
+        - { name: POSTGRES_HOST, value: "product-db" }
+        - { name: POSTGRES_DB,   value: "products" }
+        - { name: POSTGRES_USER, value: "postgres" }
+        - { name: POSTGRES_PASSWORD, value: "postgres" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: product-service }
+spec:
+  selector: { app: product }
+  ports: [{ port: 8000, targetPort: 8000, protocol: TCP, name: http }]
+  type: ClusterIP
