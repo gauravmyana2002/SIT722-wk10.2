@@ -1,0 +1,89 @@
+# .github/workflows/frontend-cd.yml
+name: CD - Deploy Frontend to AKS
+
+on:
+  workflow_run:
+    workflows: ["CD - Deploy Backend Services to AKS"]   # run after backend CD
+    types: [completed]
+  workflow_dispatch:                                     # manual run
+    inputs:
+      aks_cluster_name:
+        description: "AKS Cluster name"
+        required: false
+        default: "<aks_name>"
+      aks_resource_group:
+        description: "AKS Resource Group"
+        required: false
+        default: "<rg_name>"
+      product_api_url:
+        description: "Product API URL (manual override)"
+        required: false
+      order_api_url:
+        description: "Order API URL (manual override)"
+        required: false
+
+jobs:
+  deploy_frontend:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS Context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ github.event_name == 'workflow_dispatch' && inputs.aks_resource_group || secrets.AKS_RESOURCE_GROUP }}
+          cluster-name:   ${{ github.event_name == 'workflow_dispatch' && inputs.aks_cluster_name   || secrets.AKS_CLUSTER }}
+
+      # Grab backend IPs if not passed in manually
+      - name: Get Backend IPs
+        id: backend_ips
+        run: |
+          PROD="${{ inputs.product_api_url }}"
+          ORD="${{ inputs.order_api_url }}"
+
+          if [ -z "$PROD" ] || [ -z "$ORD" ]; then
+            echo "Resolving IPs from AKS..."
+            for i in {1..60}; do
+              PROD=$(kubectl get svc product-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+              ORD=$(kubectl get svc order-service-w08e1   -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+              if [ -n "$PROD" ] && [ -n "$ORD" ]; then break; fi
+              sleep 5
+            done
+          fi
+
+          if [ -z "$PROD" ] || [ -z "$ORD" ]; then
+            echo "::error:: Could not resolve backend service IPs"
+            exit 1
+          fi
+
+          echo "PRODUCT_URL=http://$PROD:8000" >> $GITHUB_ENV
+          echo "ORDER_URL=http://$ORD:8001"   >> $GITHUB_ENV
+
+      - name: Inject API URLs into main.js
+        run: |
+          sed -i "s|_PRODUCT_API_URL_|${PRODUCT_URL}|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|${ORDER_URL}|g"     frontend/main.js
+          echo "Injected URLs:"
+          grep "_API_URL_" -n frontend/main.js || true
+
+      - name: Login to ACR
+        run: az acr login --name ${{ secrets.ACR_NAME }}
+
+      - name: Build and Push Frontend Image
+        run: |
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest ./frontend
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest
+
+      - name: Deploy Frontend to AKS
+        run: |
+          cd k8s
+          kubectl apply -f frontend.yaml
+          kubectl rollout status deploy/frontend --timeout=120s
