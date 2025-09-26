@@ -9,7 +9,7 @@ spec:
     spec:
       containers:
       - name: product-service
-        image: <ACR_LOGIN_SERVER>/product_service:latest
+        image: sit722wk10acr.azurecr.io/product_service:latest
         ports: [{ containerPort: 8000 }]
         env:
         - { name: POSTGRES_HOST, value: "product-db" }
