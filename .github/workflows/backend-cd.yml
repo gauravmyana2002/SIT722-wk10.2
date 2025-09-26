@@ -191,7 +191,9 @@ jobs:
           echo "::notice:: Order Service IP:     $ORDER_IP:8002"
           echo "::notice:: Customer Service IP:  $CUSTOMER_IP:8003"
 
-      - name: Health checks
+      - name: Health checks (external)
         run: |
-          kubectl run curl -n "$NS" --rm -i --tty --image=curlimages/curl -- \
-            sh -c "for u in $PRODUCT_IP:8001/health $ORDER_IP:8002/health $CUSTOMER_IP:8003/health; do echo GET \$u; curl -sf http://\$u; echo; done"
+          for u in "http://${PRODUCT_IP}:8001/health" "http://${CUSTOMER_IP}:8002/health" "http://${ORDER_IP}:8003/health"; do
+          echo "GET $u"
+          curl -sf "$u" || exit 1
+          done
