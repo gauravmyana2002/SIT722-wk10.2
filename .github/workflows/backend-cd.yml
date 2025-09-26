@@ -1,4 +1,4 @@
-name: Backend CD - Deploy to Staging
+name: Stage 2 - Backend CD - Deploy to Staging
 
 on:
   workflow_dispatch:
