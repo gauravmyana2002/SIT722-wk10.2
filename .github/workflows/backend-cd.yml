@@ -4,48 +4,55 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
-# check
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      NS: sit722-staging-${{ github.run_id }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
-        with: { creds: ${{ secrets.AZURE_CREDENTIALS }} }
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Set AKS context
         uses: azure/aks-set-context@v3
         with:
           resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          cluster-name:   ${{ secrets.AKS_CLUSTER }}
+          cluster-name: ${{ secrets.AKS_CLUSTER }}
 
-      - name: Create staging ns
-        run: kubectl create namespace sit722-staging-${{ github.run_id }}
+      - name: Create staging namespace
+        run: kubectl create namespace "$NS" || true
 
-      - name: Deploy DBs and services
+      - name: Prepare manifests (inject ACR)
         run: |
-          NS=sit722-staging-${{ github.run_id }}
           sed -i "s|<ACR_LOGIN_SERVER>|${{ secrets.ACR_LOGIN_SERVER }}|g" k8s/*.yaml
-          kubectl apply -n $NS -f k8s/databases.yaml
-          kubectl apply -n $NS -f k8s/product.yaml
-          kubectl apply -n $NS -f k8s/customer.yaml
-          kubectl apply -n $NS -f k8s/order.yaml
 
-      - name: Wait for pods
+      - name: Apply databases
+        run: kubectl apply -n "$NS" -f k8s/databases.yaml
+
+      - name: Apply backend services
         run: |
-          NS=sit722-staging-${{ github.run_id }}
+          kubectl apply -n "$NS" -f k8s/product.yaml
+          kubectl apply -n "$NS" -f k8s/customer.yaml
+          kubectl apply -n "$NS" -f k8s/order.yaml
+
+      - name: Wait for rollouts
+        run: |
           for d in product-service customer-service order-service; do
-            kubectl rollout status deploy/$d -n $NS --timeout=180s || exit 1
+            kubectl rollout status deploy/$d -n "$NS" --timeout=180s || exit 1
           done
 
       - name: Health checks
         run: |
-          NS=sit722-staging-${{ github.run_id }}
-          kubectl run curl --rm -i --tty --image=curlimages/curl -n $NS -- \
+          kubectl run curl -n "$NS" --rm -i --tty --image=curlimages/curl -- \
             sh -c 'for u in product-service:8000/health customer-service:8000/health order-service:8000/health; do echo "GET $u"; curl -sf "http://$u"; echo; done'
 
-      - name: Teardown
+      - name: Teardown staging
         if: always()
-        run: kubectl delete namespace sit722-staging-${{ github.run_id }}
+        run: kubectl delete namespace "$NS"
