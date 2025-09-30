@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ecomm-config-w10e1
+data:
+  # Database names
+  PRODUCTS_DB_NAME: products
+  ORDERS_DB_NAME: orders
+  CUSTOMERS_DB_NAME: customers
+
+  # Azure storage config (optional, used in product service for image uploads)
+  AZURE_STORAGE_CONTAINER_NAME: product-images
+  AZURE_SAS_TOKEN_EXPIRY_HOURS: "24"
+
+  # Internal service URLs (ClusterIP or DNS form inside cluster)
+  PRODUCT_SERVICE_URL: http://product-service-w10e1:8000
+  ORDER_SERVICE_URL:   http://order-service-w10e1:8000
+  CUSTOMER_SERVICE_URL: http://customer-service-w10e1:8000
