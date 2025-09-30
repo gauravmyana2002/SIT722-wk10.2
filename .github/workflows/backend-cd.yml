@@ -1,4 +1,4 @@
-name: Backend CD - Deploy to Staging
+name: Stage 2 - Backend CD - Deploy to Staging
 
 on:
   workflow_dispatch:
@@ -8,44 +8,162 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      NS: sit722-staging-${{ github.run_id }}
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
-        with: { creds: ${{ secrets.AZURE_CREDENTIALS }} }
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Set AKS context
-        uses: azure/aks-set-context@v3
-        with:
-          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          cluster-name:   ${{ secrets.AKS_CLUSTER }}
+        run: az aks get-credentials --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" --name "${{ secrets.AKS_CLUSTER }}" --overwrite-existing
 
-      - name: Create staging ns
-        run: kubectl create namespace sit722-staging-${{ github.run_id }}
+      - name: Create namespace
+        run: kubectl create namespace "$NS" || true
 
-      - name: Deploy DBs and services
+      - name: Generate K8s manifests
+        env:
+          ACR: ${{ secrets.ACR_LOGIN_SERVER }}
         run: |
-          NS=sit722-staging-${{ github.run_id }}
-          sed -i "s|<ACR_LOGIN_SERVER>|${{ secrets.ACR_LOGIN_SERVER }}|g" k8s/*.yaml
-          kubectl apply -n $NS -f k8s/databases.yaml
-          kubectl apply -n $NS -f k8s/product.yaml
-          kubectl apply -n $NS -f k8s/customer.yaml
-          kubectl apply -n $NS -f k8s/order.yaml
+          mkdir -p k8s
 
-      - name: Wait for pods
+          # Product service + DB
+          cat > k8s/product.yaml <<YAML
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: product-service }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: product } }
+            template:
+              metadata: { labels: { app: product } }
+              spec:
+                containers:
+                - name: product-service
+                  image: ${ACR}/product_service:latest
+                  ports: [{ containerPort: 8000 }]
+                  env:
+                  - { name: POSTGRES_HOST, value: "product-db" }
+                  - { name: POSTGRES_DB,   value: "products" }
+                  - { name: POSTGRES_USER, value: "postgres" }
+                  - { name: POSTGRES_PASSWORD, value: "postgres" }
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: product-service }
+          spec:
+            selector: { app: product }
+            ports:
+              - port: 8001
+                targetPort: 8000
+            type: LoadBalancer
+          YAML
+
+          # Customer service + DB
+          cat > k8s/customer.yaml <<YAML
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: customer-service }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: customer } }
+            template:
+              metadata: { labels: { app: customer } }
+              spec:
+                containers:
+                - name: customer-service
+                  image: ${ACR}/customer_service:latest
+                  ports: [{ containerPort: 8000 }]
+                  env:
+                  - { name: POSTGRES_HOST, value: "customer-db" }
+                  - { name: POSTGRES_DB,   value: "customers" }
+                  - { name: POSTGRES_USER, value: "postgres" }
+                  - { name: POSTGRES_PASSWORD, value: "postgres" }
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: customer-service }
+          spec:
+            selector: { app: customer }
+            ports:
+              - port: 8002
+                targetPort: 8000
+            type: LoadBalancer
+          YAML
+
+          # Order service + DB
+          cat > k8s/order.yaml <<YAML
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: order-service }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: order } }
+            template:
+              metadata: { labels: { app: order } }
+              spec:
+                containers:
+                - name: order-service
+                  image: ${ACR}/order_service:latest
+                  ports: [{ containerPort: 8000 }]
+                  env:
+                  - { name: POSTGRES_HOST, value: "order-db" }
+                  - { name: POSTGRES_DB,   value: "orders" }
+                  - { name: POSTGRES_USER, value: "postgres" }
+                  - { name: POSTGRES_PASSWORD, value: "postgres" }
+                  - { name: CUSTOMER_SERVICE_URL, value: "http://customer-service:8000" }
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: order-service }
+          spec:
+            selector: { app: order }
+            ports:
+              - port: 8003
+                targetPort: 8000
+            type: LoadBalancer
+          YAML
+
+      - name: Apply manifests
         run: |
-          NS=sit722-staging-${{ github.run_id }}
-          for d in product-service customer-service order-service; do
-            kubectl rollout status deploy/$d -n $NS --timeout=180s || exit 1
+          kubectl apply -n "$NS" -f k8s/product.yaml
+          kubectl apply -n "$NS" -f k8s/customer.yaml
+          kubectl apply -n "$NS" -f k8s/order.yaml
+
+      - name: Wait for External IPs
+        run: |
+          for i in {1..60}; do
+            PRODUCT_IP=$(kubectl get svc product-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+            CUSTOMER_IP=$(kubectl get svc customer-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+            ORDER_IP=$(kubectl get svc order-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+
+            if [ -n "$PRODUCT_IP" ] && [ -n "$CUSTOMER_IP" ] && [ -n "$ORDER_IP" ]; then
+              echo "All IPs ready!"
+              break
+            fi
+            echo "Waiting for LoadBalancer IPs... attempt $i"
+            sleep 5
           done
+
+          [ -n "$PRODUCT_IP" ] || { echo "::error::Product IP not found"; exit 1; }
+          [ -n "$CUSTOMER_IP" ]|| { echo "::error::Customer IP not found"; exit 1; }
+          [ -n "$ORDER_IP" ]   || { echo "::error::Order IP not found"; exit 1; }
+
+          echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
+          echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
+          echo "ORDER_IP=$ORDER_IP" >> $GITHUB_ENV
 
       - name: Health checks
         run: |
-          NS=sit722-staging-${{ github.run_id }}
-          kubectl run curl --rm -i --tty --image=curlimages/curl -n $NS -- \
-            sh -c 'for u in product-service:8000/health customer-service:8000/health order-service:8000/health; do echo "GET $u"; curl -sf "http://$u"; echo; done'
+          for u in "http://${PRODUCT_IP}:8001/health" "http://${CUSTOMER_IP}:8002/health" "http://${ORDER_IP}:8003/health"; do
+            echo "GET $u"
+            curl -sf "$u" || exit 1
+          done
 
       - name: Teardown
         if: always()
-        run: kubectl delete namespace sit722-staging-${{ github.run_id }}
+        run: kubectl delete namespace "$NS"
