@@ -1,38 +1,75 @@
-apiVersion: v1
-kind: Pod
+
+apiVersion: apps/v1
+kind: Deployment
 metadata: { name: product-db }
 spec:
-  containers:
-  - name: postgres
-    image: postgres:15-alpine
-    env:
-    - { name: POSTGRES_DB, value: "products" }
-    - { name: POSTGRES_USER, value: "postgres" }
-    - { name: POSTGRES_PASSWORD, value: "postgres" }
-    ports: [{ containerPort: 5432 }]
+  replicas: 1
+  selector: { matchLabels: { app: product-db } }
+  template:
+    metadata: { labels: { app: product-db } }
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        env:
+        - { name: POSTGRES_DB, value: "products" }
+        - { name: POSTGRES_USER, value: "postgres" }
+        - { name: POSTGRES_PASSWORD, value: "postgres" }
+        ports: [{ containerPort: 5432 }]
 ---
 apiVersion: v1
-kind: Pod
+kind: Service
+metadata: { name: product-db }
+spec:
+  selector: { app: product-db }
+  ports: [{ port: 5432, targetPort: 5432 }]
+---
+apiVersion: apps/v1
+kind: Deployment
 metadata: { name: order-db }
 spec:
-  containers:
-  - name: postgres
-    image: postgres:15-alpine
-    env:
-    - { name: POSTGRES_DB, value: "orders" }
-    - { name: POSTGRES_USER, value: "postgres" }
-    - { name: POSTGRES_PASSWORD, value: "postgres" }
-    ports: [{ containerPort: 5432 }]
+  replicas: 1
+  selector: { matchLabels: { app: order-db } }
+  template:
+    metadata: { labels: { app: order-db } }
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        env:
+        - { name: POSTGRES_DB, value: "orders" }
+        - { name: POSTGRES_USER, value: "postgres" }
+        - { name: POSTGRES_PASSWORD, value: "postgres" }
+        ports: [{ containerPort: 5432 }]
 ---
 apiVersion: v1
-kind: Pod
+kind: Service
+metadata: { name: order-db }
+spec:
+  selector: { app: order-db }
+  ports: [{ port: 5432, targetPort: 5432 }]
+---
+apiVersion: apps/v1
+kind: Deployment
 metadata: { name: customer-db }
 spec:
-  containers:
-  - name: postgres
-    image: postgres:15-alpine
-    env:
-    - { name: POSTGRES_DB, value: "customers" }
-    - { name: POSTGRES_USER, value: "postgres" }
-    - { name: POSTGRES_PASSWORD, value: "postgres" }
-    ports: [{ containerPort: 5432 }]
+  replicas: 1
+  selector: { matchLabels: { app: customer-db } }
+  template:
+    metadata: { labels: { app: customer-db } }
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        env:
+        - { name: POSTGRES_DB, value: "customers" }
+        - { name: POSTGRES_USER, value: "postgres" }
+        - { name: POSTGRES_PASSWORD, value: "postgres" }
+        ports: [{ containerPort: 5432 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: customer-db }
+spec:
+  selector: { app: customer-db }
+  ports: [{ port: 5432, targetPort: 5432 }]
