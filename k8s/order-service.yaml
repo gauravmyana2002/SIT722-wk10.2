@@ -11,7 +11,7 @@ spec:
     spec:
       containers:
       - name: order-service-container
-        image: ${ACR_LOGIN_SERVER}/order_service:latest
+        image: sit722wk10acr.azurecr.io/order_service:latest
         imagePullPolicy: Always
         ports: [{ containerPort: 8000 }]
         env:

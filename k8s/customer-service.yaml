@@ -11,7 +11,7 @@ spec:
     spec:
       containers:
       - name: customer-service-container
-        image: ${ACR_LOGIN_SERVER}/customer_service:latest
+        image: sit722wk10acr.azurecr.io/customer_service:latest
         imagePullPolicy: Always
         ports: [{ containerPort: 8000 }]
         env:
