@@ -44,9 +44,9 @@ jobs:
 
       - name: Apply services (LB on 8001/8002/8003)
         run: |
-          kubectl apply -n "$NS" -f k8s/product-service.yaml
-          kubectl apply -n "$NS" -f k8s/order-service.yaml
-          kubectl apply -n "$NS" -f k8s/customer-service.yaml
+          kubectl apply -n "$NS" -f k8s/product.yaml
+          kubectl apply -n "$NS" -f k8s/order.yaml
+          kubectl apply -n "$NS" -f k8s/customer.yaml
 
       - name: Wait for rollouts
         run: |
