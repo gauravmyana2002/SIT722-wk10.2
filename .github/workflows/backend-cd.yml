@@ -48,12 +48,6 @@ jobs:
           kubectl apply -n "$NS" -f k8s/order.yaml
           kubectl apply -n "$NS" -f k8s/customer.yaml
 
-      - name: Wait for rollouts
-        run: |
-          for d in product-service-w10 order-service-w10 customer-service-w10; do
-            kubectl rollout status deploy/$d -n "$NS" --timeout=300s || exit 1
-          done
-
       - name: Wait for External IPs (up to 5 min)
         run: |
           get_ip () { kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}'; }
