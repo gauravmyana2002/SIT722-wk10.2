@@ -22,8 +22,7 @@ jobs:
       - name: Set AKS context
         run: az aks get-credentials --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" --name "${{ secrets.AKS_CLUSTER }}" --overwrite-existing
 
-      # Attach ACR to AKS
-      - name: Attach ACR to AKS
+      - name: Attach ACR to AKS (idempotent)
         run: |
           az aks update \
             --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" \
@@ -35,54 +34,67 @@ jobs:
 
       - name: Apply config + secrets
         run: |
-          kubectl apply -n "$NS" -f k8s/configmaps.yaml
-          kubectl apply -n "$NS" -f k8s/secrets.yaml
+          kubectl apply -n "$NS" -f week10/k8s/configmaps.yaml
+          kubectl apply -n "$NS" -f week10/k8s/secrets.yaml
 
       - name: Apply databases
         run: |
-          kubectl apply -n "$NS" -f k8s/product-db.yaml
-          kubectl apply -n "$NS" -f k8s/order-db.yaml
-          kubectl apply -n "$NS" -f k8s/customer-db.yaml
+          kubectl apply -n "$NS" -f week10/k8s/product-db.yaml
+          kubectl apply -n "$NS" -f week10/k8s/order-db.yaml
+          kubectl apply -n "$NS" -f week10/k8s/customer-db.yaml
 
-      - name: Apply services (LB on 8001/8002/8003)
+      - name: "Apply backend services (LB: 8001/8002/8003)"
         run: |
-          kubectl apply -n "$NS" -f k8s/product-service.yaml
-          kubectl apply -n "$NS" -f k8s/order-service.yaml
-          kubectl apply -n "$NS" -f k8s/customer-service.yaml
+          kubectl apply -n "$NS" -f week10/k8s/product-service.yaml
+          kubectl apply -n "$NS" -f week10/k8s/order-service.yaml
+          kubectl apply -n "$NS" -f week10/k8s/customer-service.yaml
+
+      - name: List resources (debug)
+        run: |
+          echo "--- Deployments ---"
+          kubectl get deploy -n "$NS" -o wide || true
+          echo "--- Services ---"
+          kubectl get svc -n "$NS" -o wide || true
+          echo "--- Pods ---"
+          kubectl get pods -n "$NS" -o wide || true
+
+      - name: Wait for Deployments to roll out
+        run: |
+          for d in product-service-w10e1 order-service-w10e1 customer-service-w10e1; do
+            echo "Waiting for rollout of $d"
+            kubectl rollout status deploy/$d -n "$NS" --timeout=300s || exit 1
+          done
 
       - name: Wait for Backend LoadBalancer IPs
         run: |
-          echo "Waiting for Product, Order, and Customer LoadBalancer IPs (up to 5 minutes)..."
-          PRODUCT_IP=""
-          ORDER_IP=""
-          CUSTOMER_IP=""
-
+          PRODUCT_IP=""; ORDER_IP=""; CUSTOMER_IP=""
           for i in $(seq 1 60); do
             echo "Attempt $i/60 to get IPs..."
-            PRODUCT_IP=$(kubectl get service product-service-w10 -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-            ORDER_IP=$(kubectl get service order-service-w10 -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-            CUSTOMER_IP=$(kubectl get service customer-service-w10 -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-
+            PRODUCT_IP=$(kubectl get svc product-service-w10e1   -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            ORDER_IP=$(kubectl get svc   order-service-w10e1     -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            CUSTOMER_IP=$(kubectl get svc customer-service-w10e1 -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
             if [[ -n "$PRODUCT_IP" && -n "$ORDER_IP" && -n "$CUSTOMER_IP" ]]; then
-              echo "✅ All backend LoadBalancer IPs assigned!"
-              echo "Product Service IP: $PRODUCT_IP"
-              echo "Order Service IP: $ORDER_IP"
-              echo "Customer Service IP: $CUSTOMER_IP"
+              echo "All backend LoadBalancer IPs assigned!"
+              echo "Product:  $PRODUCT_IP"
+              echo "Order:    $ORDER_IP"
+              echo "Customer: $CUSTOMER_IP"
               break
             fi
             sleep 5
           done
-
           if [[ -z "$PRODUCT_IP" || -z "$ORDER_IP" || -z "$CUSTOMER_IP" ]]; then
-            echo "❌ Error: One or more LoadBalancer IPs not assigned after timeout."
+            echo "::error:: One or more LoadBalancer IPs not assigned after timeout."
+            kubectl get svc -n "$NS" -o wide || true
             exit 1
           fi
-
           echo "PRODUCT_IP=$PRODUCT_IP"   >> $GITHUB_ENV
           echo "ORDER_IP=$ORDER_IP"       >> $GITHUB_ENV
           echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
+          echo "::notice:: Product  = http://$PRODUCT_IP:8001"
+          echo "::notice:: Order    = http://$ORDER_IP:8002"
+          echo "::notice:: Customer = http://$CUSTOMER_IP:8003"
 
-      - name: External Health checks
+      - name: External health checks
         run: |
           for u in \
             "http://${PRODUCT_IP}:8001/health" \
