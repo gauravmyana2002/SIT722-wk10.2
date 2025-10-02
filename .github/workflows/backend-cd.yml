@@ -47,38 +47,38 @@ jobs:
           kubectl apply -n "$NS" -f k8s/product.yaml
           kubectl apply -n "$NS" -f k8s/order.yaml
           kubectl apply -n "$NS" -f k8s/customer.yaml
-      - name: Wait for rollouts
+
+      - name: Wait for Backend LoadBalancer IPs
         run: |
-            echo "Checking deployments in namespace $NS"
-            kubectl get deploy -n "$NS" -o wide
-            for d in product-service order-service customer-service; do
-            echo "Waiting for rollout of $d"
-            kubectl rollout status deploy/$d -n "$NS" --timeout=300s || exit 1
-            done
-          
-      - name: Wait for External IPs (up to 5 min)
-        run: |
-          get_ip () { kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}'; }
-          for i in {1..60}; do
-            PRODUCT_IP=$(get_ip product-service-w10) || true
-            ORDER_IP=$(get_ip order-service-w10) || true
-            CUSTOMER_IP=$(get_ip customer-service-w10) || true
-            if [ -n "$PRODUCT_IP" ] && [ -n "$ORDER_IP" ] && [ -n "$CUSTOMER_IP" ]; then
-              echo "All IPs ready!"
-              break
-            fi
-            echo "Waiting for LoadBalancer IPs... attempt $i"
-            sleep 5
+          echo "Waiting for Product, Order, and Customer LoadBalancer IPs (up to 5 minutes)..."
+          PRODUCT_IP=""
+          ORDER_IP=""
+          CUSTOMER_IP=""
+
+          for i in $(seq 1 60); do
+          echo "Attempt $i/60 to get IPs..."
+          PRODUCT_IP=$(kubectl get service product-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+          ORDER_IP=$(kubectl get service order-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+          CUSTOMER_IP=$(kubectl get service customer-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+
+          if [[ -n "$PRODUCT_IP" && -n "$ORDER_IP" && -n "$CUSTOMER_IP" ]]; then
+          echo "✅ All backend LoadBalancer IPs assigned!"
+          echo "Product Service IP: $PRODUCT_IP"
+          echo "Order Service IP: $ORDER_IP"
+          echo "Customer Service IP: $CUSTOMER_IP"
+          break
+          fi
+          sleep 5
           done
-          [ -n "$PRODUCT_IP" ]  || { echo "::error:: Product IP not found"; exit 1; }
-          [ -n "$ORDER_IP" ]    || { echo "::error:: Order IP not found"; exit 1; }
-          [ -n "$CUSTOMER_IP" ] || { echo "::error:: Customer IP not found"; exit 1; }
+
+          if [[ -z "$PRODUCT_IP" || -z "$ORDER_IP" || -z "$CUSTOMER_IP" ]]; then
+          echo "❌ Error: One or more LoadBalancer IPs not assigned after timeout."
+          exit 1
+          fi
+
           echo "PRODUCT_IP=$PRODUCT_IP"   >> $GITHUB_ENV
           echo "ORDER_IP=$ORDER_IP"       >> $GITHUB_ENV
           echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
-          echo "::notice:: Product  = http://$PRODUCT_IP:8001"
-          echo "::notice:: Order    = http://$ORDER_IP:8002"
-          echo "::notice:: Customer = http://$CUSTOMER_IP:8003"
 
       - name: External Health checks
         run: |
