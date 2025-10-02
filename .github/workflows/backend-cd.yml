@@ -25,57 +25,42 @@ jobs:
       - name: Create namespace
         run: kubectl create namespace "$NS" || true
 
-      # Optional: ensure pulls from ACR (if your AKS not attached to ACR)
-      # - name: Create image pull secret (if needed)
-      #   run: |
-      #     kubectl delete secret acr-pull -n "$NS" || true
-      #     kubectl create secret docker-registry acr-pull \
-      #       --docker-server="${{ secrets.ACR_LOGIN_SERVER }}" \
-      #       --docker-username="${{ secrets.ACR_USERNAME }}" \
-      #       --docker-password="${{ secrets.ACR_PASSWORD }}" \
-      #       -n "$NS"
-      #     kubectl patch serviceaccount default -n "$NS" -p '{"imagePullSecrets":[{"name":"acr-pull"}]}'
-
-      - name: Apply config + secrets (week08 style)
+      - name: Apply ConfigMap and Secret
         run: |
-          kubectl apply -n "$NS" -f week08/k8s/configmaps.yaml
-          kubectl apply -n "$NS" -f week08/k8s/secrets.yaml
+          kubectl apply -n "$NS" -f k8s/configmaps.yaml
+          kubectl apply -n "$NS" -f k8s/secrets.yaml
 
       - name: Apply databases
-        run: |
-          kubectl apply -n "$NS" -f week08/k8s/product-db.yaml
-          kubectl apply -n "$NS" -f week08/k8s/order-db.yaml
-          kubectl apply -n "$NS" -f week08/k8s/customer-db.yaml
+        run: kubectl apply -n "$NS" -f k8s/databases.yaml
 
-      - name: Apply services (LB on 8001/8002/8003)
+      - name: Apply backend services
         run: |
-          kubectl apply -n "$NS" -f week08/k8s/product-service.yaml
-          kubectl apply -n "$NS" -f week08/k8s/order-service.yaml
-          kubectl apply -n "$NS" -f week08/k8s/customer-service.yaml
+          kubectl apply -n "$NS" -f k8s/product.yaml
+          kubectl apply -n "$NS" -f k8s/order.yaml
+          kubectl apply -n "$NS" -f k8s/customer.yaml
 
       - name: Wait for rollouts
         run: |
-          for d in product-service-w08e1 order-service-w08e1 customer-service-w08e1; do
+          for d in product-service order-service customer-service; do
             kubectl rollout status deploy/$d -n "$NS" --timeout=300s || exit 1
           done
 
-      - name: Wait for External IPs (up to 5 min)
+      - name: Wait for External IPs (LB ports 8001/8002/8003)
         run: |
           get_ip () { kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}'; }
           for i in {1..60}; do
-            PRODUCT_IP=$(get_ip product-service-w08e1) || true
-            ORDER_IP=$(get_ip   order-service-w08e1)   || true
-            CUSTOMER_IP=$(get_ip customer-service-w08e1) || true
+            PRODUCT_IP=$(get_ip product-service)   || true
+            ORDER_IP=$(get_ip   order-service)     || true
+            CUSTOMER_IP=$(get_ip customer-service) || true
             if [ -n "$PRODUCT_IP" ] && [ -n "$ORDER_IP" ] && [ -n "$CUSTOMER_IP" ]; then
-              echo "All IPs ready!"
               break
             fi
             echo "Waiting for LoadBalancer IPs... attempt $i"
             sleep 5
           done
-          [ -n "$PRODUCT_IP" ]  || { echo "::error:: Product IP not found"; exit 1; }
-          [ -n "$ORDER_IP" ]    || { echo "::error:: Order IP not found"; exit 1; }
-          [ -n "$CUSTOMER_IP" ] || { echo "::error:: Customer IP not found"; exit 1; }
+          [ -n "$PRODUCT_IP" ]  || { echo "::error::Product IP not found"; exit 1; }
+          [ -n "$ORDER_IP" ]    || { echo "::error::Order IP not found"; exit 1; }
+          [ -n "$CUSTOMER_IP" ] || { echo "::error::Customer IP not found"; exit 1; }
           echo "PRODUCT_IP=$PRODUCT_IP"   >> $GITHUB_ENV
           echo "ORDER_IP=$ORDER_IP"       >> $GITHUB_ENV
           echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
@@ -83,18 +68,16 @@ jobs:
           echo "::notice:: Order    = http://$ORDER_IP:8002"
           echo "::notice:: Customer = http://$CUSTOMER_IP:8003"
 
-      # External health checks against LB IPs and ports
       - name: Health checks (external)
         run: |
           for u in \
             "http://${PRODUCT_IP}:8001/health" \
             "http://${ORDER_IP}:8002/health" \
             "http://${CUSTOMER_IP}:8003/health"; do
-            echo "GET $u"
-            curl -sf "$u" || exit 1
+            echo "GET $u"; curl -sf "$u" || exit 1
           done
 
-      # For staging cleanup; remove if you want them to persist
+      # remove if you want to keep the env running
       - name: Teardown
         if: always()
         run: kubectl delete namespace "$NS"
