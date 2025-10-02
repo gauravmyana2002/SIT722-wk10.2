@@ -40,9 +40,7 @@ jobs:
 
       - name: Apply databases
         run: |
-          kubectl apply -n "$NS" -f k8s/product-db.yaml
-          kubectl apply -n "$NS" -f k8s/order-db.yaml
-          kubectl apply -n "$NS" -f k8s/customer-db.yaml
+          kubectl apply -n "$NS" -f k8s/databases.yaml
 
       - name: Apply services (LB on 8001/8002/8003)
         run: |
