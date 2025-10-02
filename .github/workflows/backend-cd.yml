@@ -35,20 +35,20 @@ jobs:
 
       - name: Apply config + secrets
         run: |
-          kubectl apply -n "$NS" -f week10/k8s/configmaps.yaml
-          kubectl apply -n "$NS" -f week10/k8s/secrets.yaml
+          kubectl apply -n "$NS" -f k8s/configmaps.yaml
+          kubectl apply -n "$NS" -f k8s/secrets.yaml
 
       - name: Apply databases
         run: |
-          kubectl apply -n "$NS" -f week10/k8s/product-db.yaml
-          kubectl apply -n "$NS" -f week10/k8s/order-db.yaml
-          kubectl apply -n "$NS" -f week10/k8s/customer-db.yaml
+          kubectl apply -n "$NS" -f k8s/product-db.yaml
+          kubectl apply -n "$NS" -f k8s/order-db.yaml
+          kubectl apply -n "$NS" -f k8s/customer-db.yaml
 
       - name: Apply services (LB on 8001/8002/8003)
         run: |
-          kubectl apply -n "$NS" -f week10/k8s/product-service.yaml
-          kubectl apply -n "$NS" -f week10/k8s/order-service.yaml
-          kubectl apply -n "$NS" -f week10/k8s/customer-service.yaml
+          kubectl apply -n "$NS" -f k8s/product-service.yaml
+          kubectl apply -n "$NS" -f k8s/order-service.yaml
+          kubectl apply -n "$NS" -f k8s/customer-service.yaml
 
       - name: Wait for Backend LoadBalancer IPs
         run: |
