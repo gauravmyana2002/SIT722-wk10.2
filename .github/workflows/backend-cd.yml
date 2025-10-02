@@ -22,53 +22,57 @@ jobs:
       - name: Set AKS context
         run: az aks get-credentials --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" --name "${{ secrets.AKS_CLUSTER }}" --overwrite-existing
 
+      # Attach ACR to AKS (idempotent; safe if already attached)
+      - name: Attach ACR to AKS
+        run: |
+          az aks update \
+            --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" \
+            --name "${{ secrets.AKS_CLUSTER }}" \
+            --attach-acr "${{ secrets.ACR_NAME }}"
+
       - name: Create namespace
         run: kubectl create namespace "$NS" || true
 
-      - name: Apply ConfigMap and Secret
+      - name: Apply config + secrets
         run: |
-          kubectl apply -n "$NS" -f k8s/configmaps.yaml
-          kubectl apply -n "$NS" -f k8s/secrets.yaml
+          kubectl apply -n "$NS" -f week10/k8s/configmaps.yaml
+          kubectl apply -n "$NS" -f week10/k8s/secrets.yaml
 
       - name: Apply databases
-        run: kubectl apply -n "$NS" -f k8s/databases.yaml
-
-      - name: Apply backend services
         run: |
-          kubectl apply -n "$NS" -f k8s/product.yaml
-          kubectl apply -n "$NS" -f k8s/order.yaml
-          kubectl apply -n "$NS" -f k8s/customer.yaml
+          kubectl apply -n "$NS" -f week10/k8s/product-db.yaml
+          kubectl apply -n "$NS" -f week10/k8s/order-db.yaml
+          kubectl apply -n "$NS" -f week10/k8s/customer-db.yaml
 
-      - name: Debug pods if rollout fails
-        if: failure()
+      - name: Apply services (LB on 8001/8002/8003)
         run: |
-          echo "=== Pods ==="
-          kubectl get pods -n "$NS" -o wide
-          echo "=== Events ==="
-          kubectl get events -n "$NS" --sort-by=.metadata.creationTimestamp | tail -20
-          echo "=== Logs (product-service) ==="
-          kubectl logs deploy/product-service -n "$NS" || true
-          echo "=== Logs (order-service) ==="
-          kubectl logs deploy/order-service -n "$NS" || true
-          echo "=== Logs (customer-service) ==="
-          kubectl logs deploy/customer-service -n "$NS" || true
+          kubectl apply -n "$NS" -f week10/k8s/product-service.yaml
+          kubectl apply -n "$NS" -f week10/k8s/order-service.yaml
+          kubectl apply -n "$NS" -f week10/k8s/customer-service.yaml
 
-      - name: Wait for External IPs (LB ports 8001/8002/8003)
+      - name: Wait for rollouts
+        run: |
+          for d in product-service-w10 order-service-w10 customer-service-w10; do
+            kubectl rollout status deploy/$d -n "$NS" --timeout=300s || exit 1
+          done
+
+      - name: Wait for External IPs (up to 5 min)
         run: |
           get_ip () { kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}'; }
           for i in {1..60}; do
-            PRODUCT_IP=$(get_ip product-service)   || true
-            ORDER_IP=$(get_ip   order-service)     || true
-            CUSTOMER_IP=$(get_ip customer-service) || true
+            PRODUCT_IP=$(get_ip product-service-w10) || true
+            ORDER_IP=$(get_ip order-service-w10) || true
+            CUSTOMER_IP=$(get_ip customer-service-w10) || true
             if [ -n "$PRODUCT_IP" ] && [ -n "$ORDER_IP" ] && [ -n "$CUSTOMER_IP" ]; then
+              echo "All IPs ready!"
               break
             fi
             echo "Waiting for LoadBalancer IPs... attempt $i"
             sleep 5
           done
-          [ -n "$PRODUCT_IP" ]  || { echo "::error::Product IP not found"; exit 1; }
-          [ -n "$ORDER_IP" ]    || { echo "::error::Order IP not found"; exit 1; }
-          [ -n "$CUSTOMER_IP" ] || { echo "::error::Customer IP not found"; exit 1; }
+          [ -n "$PRODUCT_IP" ]  || { echo "::error:: Product IP not found"; exit 1; }
+          [ -n "$ORDER_IP" ]    || { echo "::error:: Order IP not found"; exit 1; }
+          [ -n "$CUSTOMER_IP" ] || { echo "::error:: Customer IP not found"; exit 1; }
           echo "PRODUCT_IP=$PRODUCT_IP"   >> $GITHUB_ENV
           echo "ORDER_IP=$ORDER_IP"       >> $GITHUB_ENV
           echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
@@ -76,16 +80,12 @@ jobs:
           echo "::notice:: Order    = http://$ORDER_IP:8002"
           echo "::notice:: Customer = http://$CUSTOMER_IP:8003"
 
-      - name: Health checks (external)
+      - name: External Health checks
         run: |
           for u in \
             "http://${PRODUCT_IP}:8001/health" \
             "http://${ORDER_IP}:8002/health" \
             "http://${CUSTOMER_IP}:8003/health"; do
-            echo "GET $u"; curl -sf "$u" || exit 1
+            echo "GET $u"
+            curl -sf "$u" || exit 1
           done
-
-      # remove if you want to keep the env running
-      - name: Teardown
-        if: always()
-        run: kubectl delete namespace "$NS"
