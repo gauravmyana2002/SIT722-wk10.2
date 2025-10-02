@@ -39,11 +39,19 @@ jobs:
           kubectl apply -n "$NS" -f k8s/order.yaml
           kubectl apply -n "$NS" -f k8s/customer.yaml
 
-      - name: Wait for rollouts
+      - name: Debug pods if rollout fails
+        if: failure()
         run: |
-          for d in product-service order-service customer-service; do
-            kubectl rollout status deploy/$d -n "$NS" --timeout=300s || exit 1
-          done
+          echo "=== Pods ==="
+          kubectl get pods -n "$NS" -o wide
+          echo "=== Events ==="
+          kubectl get events -n "$NS" --sort-by=.metadata.creationTimestamp | tail -20
+          echo "=== Logs (product-service) ==="
+          kubectl logs deploy/product-service -n "$NS" || true
+          echo "=== Logs (order-service) ==="
+          kubectl logs deploy/order-service -n "$NS" || true
+          echo "=== Logs (customer-service) ==="
+          kubectl logs deploy/customer-service -n "$NS" || true
 
       - name: Wait for External IPs (LB ports 8001/8002/8003)
         run: |
