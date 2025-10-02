@@ -22,7 +22,7 @@ jobs:
       - name: Set AKS context
         run: az aks get-credentials --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" --name "${{ secrets.AKS_CLUSTER }}" --overwrite-existing
 
-      # Attach ACR to AKS (idempotent; safe if already attached)
+      # Attach ACR to AKS
       - name: Attach ACR to AKS
         run: |
           az aks update \
@@ -35,18 +35,20 @@ jobs:
 
       - name: Apply config + secrets
         run: |
-          kubectl apply -n "$NS" -f k8s/configmaps.yaml
-          kubectl apply -n "$NS" -f k8s/secrets.yaml
+          kubectl apply -n "$NS" -f week10/k8s/configmaps.yaml
+          kubectl apply -n "$NS" -f week10/k8s/secrets.yaml
 
       - name: Apply databases
         run: |
-          kubectl apply -n "$NS" -f k8s/databases.yaml
+          kubectl apply -n "$NS" -f week10/k8s/product-db.yaml
+          kubectl apply -n "$NS" -f week10/k8s/order-db.yaml
+          kubectl apply -n "$NS" -f week10/k8s/customer-db.yaml
 
       - name: Apply services (LB on 8001/8002/8003)
         run: |
-          kubectl apply -n "$NS" -f k8s/product.yaml
-          kubectl apply -n "$NS" -f k8s/order.yaml
-          kubectl apply -n "$NS" -f k8s/customer.yaml
+          kubectl apply -n "$NS" -f week10/k8s/product-service.yaml
+          kubectl apply -n "$NS" -f week10/k8s/order-service.yaml
+          kubectl apply -n "$NS" -f week10/k8s/customer-service.yaml
 
       - name: Wait for Backend LoadBalancer IPs
         run: |
@@ -56,24 +58,24 @@ jobs:
           CUSTOMER_IP=""
 
           for i in $(seq 1 60); do
-          echo "Attempt $i/60 to get IPs..."
-          PRODUCT_IP=$(kubectl get service product-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-          ORDER_IP=$(kubectl get service order-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-          CUSTOMER_IP=$(kubectl get service customer-service -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            echo "Attempt $i/60 to get IPs..."
+            PRODUCT_IP=$(kubectl get service product-service-w10 -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            ORDER_IP=$(kubectl get service order-service-w10 -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            CUSTOMER_IP=$(kubectl get service customer-service-w10 -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
 
-          if [[ -n "$PRODUCT_IP" && -n "$ORDER_IP" && -n "$CUSTOMER_IP" ]]; then
-          echo "✅ All backend LoadBalancer IPs assigned!"
-          echo "Product Service IP: $PRODUCT_IP"
-          echo "Order Service IP: $ORDER_IP"
-          echo "Customer Service IP: $CUSTOMER_IP"
-          break
-          fi
-          sleep 5
+            if [[ -n "$PRODUCT_IP" && -n "$ORDER_IP" && -n "$CUSTOMER_IP" ]]; then
+              echo "✅ All backend LoadBalancer IPs assigned!"
+              echo "Product Service IP: $PRODUCT_IP"
+              echo "Order Service IP: $ORDER_IP"
+              echo "Customer Service IP: $CUSTOMER_IP"
+              break
+            fi
+            sleep 5
           done
 
           if [[ -z "$PRODUCT_IP" || -z "$ORDER_IP" || -z "$CUSTOMER_IP" ]]; then
-          echo "❌ Error: One or more LoadBalancer IPs not assigned after timeout."
-          exit 1
+            echo "❌ Error: One or more LoadBalancer IPs not assigned after timeout."
+            exit 1
           fi
 
           echo "PRODUCT_IP=$PRODUCT_IP"   >> $GITHUB_ENV

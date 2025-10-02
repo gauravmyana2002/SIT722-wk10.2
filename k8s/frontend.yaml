@@ -1,33 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: frontend
-  labels:
-    app: frontend
+  name: frontend-w10e1
+  labels: { app: frontend }
 spec:
   replicas: 1
-  selector:
-    matchLabels:
-      app: frontend
+  selector: { matchLabels: { app: frontend } }
   template:
-    metadata:
-      labels:
-        app: frontend
+    metadata: { labels: { app: frontend } }
     spec:
       containers:
-      - name: frontend
-        image: sit722wk10acr.azurecr.io/frontend:latest
-        ports:
-        - containerPort: 80
+      - name: frontend-container
+        image: ${ACR_LOGIN_SERVER}/frontend:latest
+        imagePullPolicy: Always
+        ports: [{ containerPort: 80 }]
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: frontend
+  name: frontend-w10e1
+  labels: { app: frontend }
 spec:
+  selector: { app: frontend }
+  ports: [{ protocol: TCP, port: 80, targetPort: 80 }]
   type: LoadBalancer
-  selector:
-    app: frontend
-  ports:
-  - port: 80
-    targetPort: 80
