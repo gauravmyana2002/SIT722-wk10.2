@@ -39,24 +39,25 @@ jobs:
       # --- Resolve backend URLs (from inputs or discover across namespaces) ---
       - name: Resolve backend IPs
         run: |
-          get_ip_any_ns () {
-            kubectl get svc -A -o jsonpath="{range .items[?(@.metadata.name=='$1' && @.status.loadBalancer.ingress[0].ip)]}{.status.loadBalancer.ingress[0].ip}{end}"
+          get_ip () {
+          kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null
           }
 
-          P_IN="${{ inputs.product_url }}"
-          O_IN="${{ inputs.order_url }}"
-          C_IN="${{ inputs.customer_url }}"
+          PRODUCT_IP=$(get_ip product-service) || true
+          ORDER_IP=$(get_ip order-service) || true
+          CUSTOMER_IP=$(get_ip customer-service) || true
 
-          if [ -z "$P_IN" ]; then P=$(get_ip_any_ns product-service);  [ -n "$P" ] || { echo "::error::Product IP not found"; exit 1; }; PRODUCT_URL="http://$P:${PROD_PORT}"; else PRODUCT_URL="$P_IN"; fi
-          if [ -z "$O_IN" ]; then O=$(get_ip_any_ns order-service);    [ -n "$O" ] || { echo "::error::Order IP not found"; exit 1; };   ORDER_URL="http://$O:${ORD_PORT}";   else ORDER_URL="$O_IN";   fi
-          if [ -z "$C_IN" ]; then C=$(get_ip_any_ns customer-service); [ -n "$C" ] || { echo "::error::Customer IP not found"; exit 1; }; CUSTOMER_URL="http://$C:${CUST_PORT}"; else CUSTOMER_URL="$C_IN"; fi
+          if [ -z "$PRODUCT_IP" ]; then echo "::error::Product IP not found"; exit 1; fi
+          if [ -z "$ORDER_IP" ]; then echo "::error::Order IP not found"; exit 1; fi
+          if [ -z "$CUSTOMER_IP" ]; then echo "::error::Customer IP not found"; exit 1; fi
 
-          echo "PRODUCT_URL=$PRODUCT_URL"   >> $GITHUB_ENV
-          echo "ORDER_URL=$ORDER_URL"       >> $GITHUB_ENV
-          echo "CUSTOMER_URL=$CUSTOMER_URL" >> $GITHUB_ENV
-          echo "::notice:: Product  = $PRODUCT_URL"
-          echo "::notice:: Order    = $ORDER_URL"
-          echo "::notice:: Customer = $CUSTOMER_URL"
+          echo "PRODUCT_URL=http://$PRODUCT_IP:${PROD_PORT}"   >> $GITHUB_ENV
+          echo "ORDER_URL=http://$ORDER_IP:${ORD_PORT}"       >> $GITHUB_ENV
+          echo "CUSTOMER_URL=http://$CUSTOMER_IP:${CUST_PORT}" >> $GITHUB_ENV
+
+          echo "::notice:: Product  = http://$PRODUCT_IP:${PROD_PORT}"
+          echo "::notice:: Order    = http://$ORDER_IP:${ORD_PORT}"
+          echo "::notice:: Customer = http://$CUSTOMER_IP:${CUST_PORT}"
 
       - name: Inject API URLs into main.js
         run: |
