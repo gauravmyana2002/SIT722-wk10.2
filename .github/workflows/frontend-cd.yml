@@ -25,10 +25,8 @@ jobs:
   deploy_frontend:
     runs-on: ubuntu-latest
     env:
-      # frontend namespace (unique per run)
       NS: sit722-frontend-${{ github.run_id }}
 
-      # fallback service names for discovery (if payload/manual not provided)
       PRODUCT_SVC: product-service
       ORDER_SVC: order-service
       CUSTOMER_SVC: customer-service
@@ -67,12 +65,12 @@ jobs:
           set -euo pipefail
           trim_slash(){ printf "%s" "${1%/}"; }
 
-          # 1) prefer repository_dispatch payload
+          # prefer repository_dispatch payload
           P_IN="${{ github.event.client_payload.product_url || '' }}"
           O_IN="${{ github.event.client_payload.order_url   || '' }}"
           C_IN="${{ github.event.client_payload.customer_url|| '' }}"
 
-          # 2) manual overrides (workflow_dispatch inputs)
+          # allow manual overrides
           [ -z "$P_IN" ] && P_IN="${{ inputs.product_url || '' }}"
           [ -z "$O_IN" ] && O_IN="${{ inputs.order_url   || '' }}"
           [ -z "$C_IN" ] && C_IN="${{ inputs.customer_url|| '' }}"
@@ -81,7 +79,7 @@ jobs:
             P_BASE="$(trim_slash "$P_IN")"
             O_BASE="$(trim_slash "$O_IN")"
             C_BASE="$(trim_slash "$C_IN")"
-            # WRITE UNQUOTED VALUES (no surrounding quotes)
+            # write UNQUOTED values
             echo "PRODUCT_URL=${P_BASE}"   >> "$GITHUB_ENV"
             echo "ORDER_URL=${O_BASE}"     >> "$GITHUB_ENV"
             echo "CUSTOMER_URL=${C_BASE}"  >> "$GITHUB_ENV"
@@ -89,7 +87,7 @@ jobs:
             exit 0
           fi
 
-          # 3) fallback discovery across namespaces
+          # fallback discovery across namespaces
           need_ns(){ kubectl get svc -A | awk -v n="$1" '$2==n{print $1; exit}'; }
           get_ep(){ kubectl get svc "$2" -n "$1" -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}'; }
 
@@ -107,51 +105,69 @@ jobs:
             sleep 5
           done
 
-          if [[ -z "$P_EP" || -z "$O_EP" || -z "$C_EP" ]]; then
-            echo "::error::Timed out waiting for LoadBalancer endpoints"
-            kubectl get svc -A -o wide || true
-            exit 1
-          fi
+          [[ -n "$P_EP" && -n "$O_EP" && -n "$C_EP" ]] || { echo "::error::Timed out waiting for endpoints"; kubectl get svc -A -o wide || true; exit 1; }
 
-          # store plain root URLs (no extra quotes)
+          # write UNQUOTED values (plain roots)
           echo "PRODUCT_URL=http://${P_EP}:${PROD_PORT}"   >> "$GITHUB_ENV"
           echo "ORDER_URL=http://${O_EP}:${ORD_PORT}"      >> "$GITHUB_ENV"
           echo "CUSTOMER_URL=http://${C_EP}:${CUST_PORT}"  >> "$GITHUB_ENV"
 
-          echo "::notice::Resolved Product=${PRODUCT_URL:-}"
-          echo "::notice::Resolved Order=${ORDER_URL:-}"
-          echo "::notice::Resolved Customer=${CUSTOMER_URL:-}"
+          echo "PRODUCT_URL from env: ${PRODUCT_URL:-}"
+          echo "ORDER_URL  from env: ${ORDER_URL:-}"
+          echo "CUSTOMER_URL from env: ${CUSTOMER_URL:-}"
 
-      - name: Inject API URLs into frontend/main.js and sanitize patterns
+      - name: Inject API URLs into frontend/main.js (robust)
         shell: bash
         run: |
           set -euo pipefail
+          TARGET="frontend/main.js"
 
-          # Ensure placeholders are inside JS quotes so sed produces valid string literals.
-          sed -i 's|const PRODUCT_API_BASE_URL *= *.*|const PRODUCT_API_BASE_URL = "_PRODUCT_API_URL_";|' frontend/main.js || true
-          sed -i 's|const ORDER_API_BASE_URL *= *.*|const ORDER_API_BASE_URL = "_ORDER_API_URL_";|' frontend/main.js || true
-          sed -i 's|const CUSTOMER_API_BASE_URL *= *.*|const CUSTOMER_API_BASE_URL = "_CUSTOMER_API_BASE_URL_";|' frontend/main.js || true
+          if [ ! -f "$TARGET" ]; then
+            echo "::notice::$TARGET not found. Searching repository for main.js..."
+            FOUND=$(find . -type f -name 'main.js' -maxdepth 6 | head -n1 || true)
+            if [ -n "$FOUND" ]; then
+              echo "::notice::Using discovered file: $FOUND"
+              TARGET="$FOUND"
+            else
+              echo "::error::frontend main.js not found. Repo layout differs from expected."
+              ls -la
+              exit 1
+            fi
+          fi
 
-          # Replace placeholders with the plain root URLs.
-          sed -i "s|_PRODUCT_API_URL_|${PRODUCT_URL}|g"   frontend/main.js
-          sed -i "s|_ORDER_API_URL_|${ORDER_URL}|g"       frontend/main.js
-          sed -i "s|_CUSTOMER_API_URL_|${CUSTOMER_URL}|g" frontend/main.js
+          echo "::notice::Replacing placeholders in $TARGET"
 
-          # Conservative sanitization: prevent building relative paths under frontend host.
-          sed -i "s|\${window.location.origin}/\${PRODUCT_API_BASE_URL}|\${PRODUCT_API_BASE_URL}|g" frontend/main.js || true
-          sed -i "s|\${window.location.origin}/\${ORDER_API_BASE_URL}|\${ORDER_API_BASE_URL}|g" frontend/main.js || true
-          sed -i "s|\${window.location.origin}/\${CUSTOMER_API_BASE_URL}|\${CUSTOMER_API_BASE_URL}|g" frontend.main.js || true || true
+          # Ensure constants use quoted placeholders so sed produces valid string literals.
+          sed -i 's|const PRODUCT_API_BASE_URL *= *.*|const PRODUCT_API_BASE_URL = "_PRODUCT_API_BASE_URL_";|' "$TARGET" || true
+          sed -i 's|const ORDER_API_BASE_URL *= *.*|const ORDER_API_BASE_URL = "_ORDER_API_BASE_URL_";|' "$TARGET" || true
+          sed -i 's|const CUSTOMER_API_BASE_URL *= *.*|const CUSTOMER_API_BASE_URL = "_CUSTOMER_API_BASE_URL_";|' "$TARGET" || true
 
-          sed -i "s|window.location.origin + '/' + PRODUCT_API_BASE_URL|PRODUCT_API_BASE_URL|g" frontend/main.js || true
-          sed -i "s|window.location.origin + '/' + ORDER_API_BASE_URL|ORDER_API_BASE_URL|g" frontend/main.js || true
-          sed -i "s|window.location.origin + '/' + CUSTOMER_API_BASE_URL|CUSTOMER_API_BASE_URL|g" frontend/main.js || true
+          # Replace common placeholder name variants (robust)
+          sed -i "s|_PRODUCT_API_BASE_URL_|${PRODUCT_URL}|g" "$TARGET" || true
+          sed -i "s|_PRODUCT_API_URL_|${PRODUCT_URL}|g"      "$TARGET" || true
 
-          sed -i "s|fetch('/' + PRODUCT_API_BASE_URL|fetch(PRODUCT_API_BASE_URL|g" frontend/main.js || true
-          sed -i "s|fetch('/' + ORDER_API_BASE_URL|fetch(ORDER_API_BASE_URL|g" frontend/main.js || true
-          sed -i "s|fetch('/' + CUSTOMER_API_BASE_URL|fetch(CUSTOMER_API_BASE_URL|g" frontend/main.js || true
+          sed -i "s|_ORDER_API_BASE_URL_|${ORDER_URL}|g"     "$TARGET" || true
+          sed -i "s|_ORDER_API_URL_|${ORDER_URL}|g"          "$TARGET" || true
 
-          echo "--- main.js preview (first 40 lines) ---"
-          head -n 40 frontend/main.js
+          sed -i "s|_CUSTOMER_API_BASE_URL_|${CUSTOMER_URL}|g" "$TARGET" || true
+          sed -i "s|_CUSTOMER_API_URL_|${CUSTOMER_URL}|g"      "$TARGET" || true
+
+          # Defensive sanitization: remove accidental patterns that would make the base a path
+          # These are conservative replacements. If your code doesn't contain them these do nothing.
+          sed -i "s|\${window.location.origin}/\${PRODUCT_API_BASE_URL}|\${PRODUCT_API_BASE_URL}|g" "$TARGET" || true
+          sed -i "s|\${window.location.origin}/\${ORDER_API_BASE_URL}|\${ORDER_API_BASE_URL}|g" "$TARGET" || true
+          sed -i "s|\${window.location.origin}/\${CUSTOMER_API_BASE_URL}|\${CUSTOMER_API_BASE_URL}|g" "$TARGET" || true
+
+          sed -i "s|window.location.origin + '/' + PRODUCT_API_BASE_URL|PRODUCT_API_BASE_URL|g" "$TARGET" || true
+          sed -i "s|window.location.origin + '/' + ORDER_API_BASE_URL|ORDER_API_BASE_URL|g" "$TARGET" || true
+          sed -i "s|window.location.origin + '/' + CUSTOMER_API_BASE_URL|CUSTOMER_API_BASE_URL|g" "$TARGET" || true
+
+          sed -i "s|fetch('/' + PRODUCT_API_BASE_URL|fetch(PRODUCT_API_BASE_URL|g" "$TARGET" || true
+          sed -i "s|fetch('/' + ORDER_API_BASE_URL|fetch(ORDER_API_BASE_URL|g" "$TARGET" || true
+          sed -i "s|fetch('/' + CUSTOMER_API_BASE_URL|fetch(CUSTOMER_API_BASE_URL|g" "$TARGET" || true
+
+          echo "--- $TARGET preview (first 40 lines) ---"
+          sed -n '1,40p' "$TARGET"
 
       - name: ACR login
         run: |
