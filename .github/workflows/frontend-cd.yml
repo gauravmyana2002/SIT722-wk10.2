@@ -25,23 +25,16 @@ jobs:
   deploy_frontend:
     runs-on: ubuntu-latest
     env:
-      # Frontend namespace
       NS: sit722-frontend-${{ github.run_id }}
 
-      # Fallback service names if discovery is needed
+      # fallback service names
       PRODUCT_SVC: product-service
       ORDER_SVC: order-service
       CUSTOMER_SVC: customer-service
 
-      # Public ports
       PROD_PORT: "8001"
       ORD_PORT:  "8002"
       CUST_PORT: "8003"
-
-      # Path suffixes
-      PRODUCT_PATH: "/products"
-      ORDER_PATH:   "/orders"
-      CUSTOMER_PATH: "/customers"
 
     steps:
       - uses: actions/checkout@v4
@@ -70,9 +63,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          trim_slash () { printf "%s" "${1%/}"; }
 
-          # 1) repository_dispatch payload from Backend CD
+          # 1) URLs from backend_cd payload
           P_IN="${{ github.event.client_payload.product_url || '' }}"
           O_IN="${{ github.event.client_payload.order_url   || '' }}"
           C_IN="${{ github.event.client_payload.customer_url|| '' }}"
@@ -83,18 +75,15 @@ jobs:
           [ -z "$C_IN" ] && C_IN="${{ inputs.customer_url|| '' }}"
 
           if [[ -n "$P_IN$O_IN$C_IN" ]]; then
-            P_BASE="$(trim_slash "$P_IN")"
-            O_BASE="$(trim_slash "$O_IN")"
-            C_BASE="$(trim_slash "$C_IN")"
-            echo "PRODUCT_URL=${P_BASE}${PRODUCT_PATH}"    >> "$GITHUB_ENV"
-            echo "ORDER_URL=${O_BASE}${ORDER_PATH}"        >> "$GITHUB_ENV"
-            echo "CUSTOMER_URL=${C_BASE}${CUSTOMER_PATH}"  >> "$GITHUB_ENV"
-            echo "Using provided URLs."
+            echo "PRODUCT_URL=$P_IN"   >> "$GITHUB_ENV"
+            echo "ORDER_URL=$O_IN"     >> "$GITHUB_ENV"
+            echo "CUSTOMER_URL=$C_IN"  >> "$GITHUB_ENV"
+            echo "Using provided URLs (no suffix)."
             exit 0
           fi
 
-          # 3) fallback discovery across namespaces (only if backends still exist)
-          need_ns () { kubectl get svc -A | awk -v n="$1" '$2==n{print $1; found=1} END{exit !found}'; }
+          # 3) fallback discovery across namespaces
+          need_ns () { kubectl get svc -A | awk -v n="$1" '$2==n{print $1; exit}'; }
           get_ep () { kubectl get svc "$2" -n "$1" -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}'; }
 
           P_NS=$(need_ns "${PRODUCT_SVC}") || { echo "::error::${PRODUCT_SVC} not found"; exit 1; }
@@ -111,13 +100,13 @@ jobs:
           done
           [[ -n "$P_EP" && -n "$O_EP" && -n "$C_EP" ]] || { echo "::error::Timed out waiting for endpoints"; exit 1; }
 
-          echo "PRODUCT_URL=http://${P_EP}:${PROD_PORT}${PRODUCT_PATH}"     >> "$GITHUB_ENV"
-          echo "ORDER_URL=http://${O_EP}:${ORD_PORT}${ORDER_PATH}"          >> "$GITHUB_ENV"
-          echo "CUSTOMER_URL=http://${C_EP}:${CUST_PORT}${CUSTOMER_PATH}"   >> "$GITHUB_ENV"
+          echo "PRODUCT_URL=http://${P_EP}:${PROD_PORT}"   >> "$GITHUB_ENV"
+          echo "ORDER_URL=http://${O_EP}:${ORD_PORT}"     >> "$GITHUB_ENV"
+          echo "CUSTOMER_URL=http://${C_EP}:${CUST_PORT}" >> "$GITHUB_ENV"
 
-          echo "::notice::Product API:  $(grep '^PRODUCT_URL=' "$GITHUB_ENV" | cut -d= -f2-)"
-          echo "::notice::Order API:    $(grep '^ORDER_URL=' "$GITHUB_ENV"   | cut -d= -f2-)"
-          echo "::notice::Customer API: $(grep '^CUSTOMER_URL=' "$GITHUB_ENV"| cut -d= -f2-)"
+          echo "::notice::Product API:  http://${P_EP}:${PROD_PORT}"
+          echo "::notice::Order API:    http://${O_EP}:${ORD_PORT}"
+          echo "::notice::Customer API: http://${C_EP}:${CUST_PORT}"
 
       - name: Inject API URLs into frontend
         run: |
