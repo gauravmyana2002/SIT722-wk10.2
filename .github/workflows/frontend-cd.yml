@@ -1,14 +1,13 @@
 name: Stage 3 - Frontend CD - Deploy to Staging
 
 on:
-  workflow_run:
-    workflows: ["Stage 2 - Backend CD - Deploy to Staging"]
-    types: [completed]
+  repository_dispatch:
+    types: [backend_cd_succeeded]
   workflow_dispatch:
     inputs:
-      product_url:  { description: "http://X.X.X.X:8001", required: false, default: "" }
-      order_url:    { description: "http://Y.Y.Y.Y:8002", required: false, default: "" }
-      customer_url: { description: "http://Z.Z.Z.Z:8003", required: false, default: "" }
+      product_url:  { description: "Override Product API URL",  required: false, default: "" }
+      order_url:    { description: "Override Order API URL",    required: false, default: "" }
+      customer_url: { description: "Override Customer API URL", required: false, default: "" }  
 
 jobs:
   deploy_frontend:
@@ -37,27 +36,36 @@ jobs:
         run: kubectl create namespace "$FRONTEND_NS" || true
 
       # --- Resolve backend URLs (from inputs or discover across namespaces) ---
-      - name: Resolve backend IPs
+      - name: Resolve backend URLs
+        id: urls
+        env:
+          NS: sit722-staging-${{ github.run_id }}
+          PROD_PORT: "8001"
+          ORD_PORT:  "8002"
+          CUST_PORT: "8003"
         run: |
-          get_ip () {
-          kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null
-          }
+          # Prefer values passed from backend via repository_dispatch
+          P_IN='${{ github.event.client_payload.product_url }}'
+          O_IN='${{ github.event.client_payload.order_url }}'
+          C_IN='${{ github.event.client_payload.customer_url }}'
 
-          PRODUCT_IP=$(get_ip product-service) || true
-          ORDER_IP=$(get_ip order-service) || true
-          CUSTOMER_IP=$(get_ip customer-service) || true
+          # Allow manual override via workflow_dispatch inputs
+          [ -n "${{ inputs.product_url }}" ]  && P_IN="${{ inputs.product_url }}"
+          [ -n "${{ inputs.order_url }}" ]    && O_IN="${{ inputs.order_url }}"
+          [ -n "${{ inputs.customer_url }}" ] && C_IN="${{ inputs.customer_url }}"
 
-          if [ -z "$PRODUCT_IP" ]; then echo "::error::Product IP not found"; exit 1; fi
-          if [ -z "$ORDER_IP" ]; then echo "::error::Order IP not found"; exit 1; fi
-          if [ -z "$CUSTOMER_IP" ]; then echo "::error::Customer IP not found"; exit 1; fi
+          get_ip () { kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null; }
 
-          echo "PRODUCT_URL=http://$PRODUCT_IP:${PROD_PORT}"   >> $GITHUB_ENV
-          echo "ORDER_URL=http://$ORDER_IP:${ORD_PORT}"       >> $GITHUB_ENV
-          echo "CUSTOMER_URL=http://$CUSTOMER_IP:${CUST_PORT}" >> $GITHUB_ENV
+          if [ -z "$P_IN" ]; then P_IN="http://$(get_ip product-service):${PROD_PORT}"; fi
+          if [ -z "$O_IN" ]; then O_IN="http://$(get_ip order-service):${ORD_PORT}";   fi
+          if [ -z "$C_IN" ]; then C_IN="http://$(get_ip customer-service):${CUST_PORT}"; fi
 
-          echo "::notice:: Product  = http://$PRODUCT_IP:${PROD_PORT}"
-          echo "::notice:: Order    = http://$ORDER_IP:${ORD_PORT}"
-          echo "::notice:: Customer = http://$CUSTOMER_IP:${CUST_PORT}"
+          echo "PRODUCT_URL=$P_IN"  >> $GITHUB_ENV
+          echo "ORDER_URL=$O_IN"    >> $GITHUB_ENV
+          echo "CUSTOMER_URL=$C_IN" >> $GITHUB_ENV
+          echo "::notice::Product  $P_IN"
+          echo "::notice::Order    $O_IN"
+          echo "::notice::Customer $C_IN"
 
       - name: Inject API URLs into main.js
         run: |

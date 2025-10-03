@@ -93,3 +93,16 @@ jobs:
           echo "::notice:: Product  = http://$PRODUCT_IP:8001"
           echo "::notice:: Order    = http://$ORDER_IP:8002"
           echo "::notice:: Customer = http://$CUSTOMER_IP:8003"
+
+      - name: Trigger Frontend CD
+        if: ${{ success() }}
+        run: |
+          curl -sSL -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d "$(jq -n \
+              --arg pu "http://${{ env.PRODUCT_IP }}:8001" \
+              --arg ou "http://${{ env.ORDER_IP }}:8002" \
+              --arg cu "http://${{ env.CUSTOMER_IP }}:8003" \
+              '{event_type:"backend_cd_succeeded", client_payload:{product_url:$pu, order_url:$ou, customer_url:$cu}}')"
