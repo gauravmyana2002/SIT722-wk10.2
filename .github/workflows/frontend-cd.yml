@@ -1,4 +1,3 @@
-# .github/workflows/frontend-cd.yml
 name: Stage 3 - Frontend CD - Deploy to Staging
 
 on:
@@ -17,16 +16,14 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      PROD_SVC_NAME: product-service
-      ORD_SVC_NAME:  order-service
-      CUST_SVC_NAME: customer-service
       PROD_PORT: "8001"
       ORD_PORT:  "8002"
       CUST_PORT: "8003"
+      FRONTEND_NS: sit722-frontend            # <- choose a stable ns for frontend
+      FRONTEND_SVC: frontend
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
@@ -36,79 +33,59 @@ jobs:
       - name: AKS context
         run: az aks get-credentials --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" --name "${{ secrets.AKS_CLUSTER }}" --overwrite-existing
 
-      - name: Resolve backend IPs (use inputs if provided)
-        id: ips
+      - name: Ensure namespace
+        run: kubectl create namespace "$FRONTEND_NS" || true
+
+      # --- Resolve backend URLs (from inputs or discover across namespaces) ---
+      - name: Resolve backend IPs
         run: |
           get_ip_any_ns () {
-            # Find LB IP for service name across all namespaces
-            kubectl get svc -A -o jsonpath="{range .items[?(@.metadata.name=='$1')]}{.status.loadBalancer.ingress[0].ip}{end}"
+            kubectl get svc -A -o jsonpath="{range .items[?(@.metadata.name=='$1' && @.status.loadBalancer.ingress[0].ip)]}{.status.loadBalancer.ingress[0].ip}{end}"
           }
 
           P_IN="${{ inputs.product_url }}"
           O_IN="${{ inputs.order_url }}"
           C_IN="${{ inputs.customer_url }}"
 
-          if [ -z "$P_IN" ]; then
-            for i in $(seq 1 60); do
-              P=$(get_ip_any_ns "${PROD_SVC_NAME}") || true
-              [ -n "$P" ] && break
-              sleep 5
-            done
-            [ -n "$P" ] || { echo "::error::Product IP not found"; exit 1; }
-            PRODUCT_URL="http://$P:${PROD_PORT}"
-          else
-            PRODUCT_URL="$P_IN"
-          fi
-
-          if [ -z "$O_IN" ]; then
-            for i in $(seq 1 60); do
-              O=$(get_ip_any_ns "${ORD_SVC_NAME}") || true
-              [ -n "$O" ] && break
-              sleep 5
-            done
-            [ -n "$O" ] || { echo "::error::Order IP not found"; exit 1; }
-            ORDER_URL="http://$O:${ORD_PORT}"
-          else
-            ORDER_URL="$O_IN"
-          fi
-
-          if [ -z "$C_IN" ]; then
-            for i in $(seq 1 60); do
-              C=$(get_ip_any_ns "${CUST_SVC_NAME}") || true
-              [ -n "$C" ] && break
-              sleep 5
-            done
-            [ -n "$C" ] || { echo "::error::Customer IP not found"; exit 1; }
-            CUSTOMER_URL="http://$C:${CUST_PORT}"
-          else
-            CUSTOMER_URL="$C_IN"
-          fi
+          if [ -z "$P_IN" ]; then P=$(get_ip_any_ns product-service);  [ -n "$P" ] || { echo "::error::Product IP not found"; exit 1; }; PRODUCT_URL="http://$P:${PROD_PORT}"; else PRODUCT_URL="$P_IN"; fi
+          if [ -z "$O_IN" ]; then O=$(get_ip_any_ns order-service);    [ -n "$O" ] || { echo "::error::Order IP not found"; exit 1; };   ORDER_URL="http://$O:${ORD_PORT}";   else ORDER_URL="$O_IN";   fi
+          if [ -z "$C_IN" ]; then C=$(get_ip_any_ns customer-service); [ -n "$C" ] || { echo "::error::Customer IP not found"; exit 1; }; CUSTOMER_URL="http://$C:${CUST_PORT}"; else CUSTOMER_URL="$C_IN"; fi
 
           echo "PRODUCT_URL=$PRODUCT_URL"   >> $GITHUB_ENV
           echo "ORDER_URL=$ORDER_URL"       >> $GITHUB_ENV
           echo "CUSTOMER_URL=$CUSTOMER_URL" >> $GITHUB_ENV
+          echo "::notice:: Product  = $PRODUCT_URL"
+          echo "::notice:: Order    = $ORDER_URL"
+          echo "::notice:: Customer = $CUSTOMER_URL"
 
-          echo "::notice::Product  = $PRODUCT_URL"
-          echo "::notice::Order    = $ORDER_URL"
-          echo "::notice::Customer = $CUSTOMER_URL"
-
-      - name: Inject API URLs into frontend/main.js
+      - name: Inject API URLs into main.js
         run: |
           sed -i "s|_PRODUCT_API_URL_|${PRODUCT_URL}|g"  frontend/main.js
           sed -i "s|_ORDER_API_URL_|${ORDER_URL}|g"      frontend/main.js
           sed -i "s|_CUSTOMER_API_URL_|${CUSTOMER_URL}|g" frontend/main.js
-          head -n 40 frontend/main.js
+          head -n 30 frontend/main.js
 
-      - name: ACR Login
+      - name: ACR login
         run: |
           ACR="${{ secrets.ACR_LOGIN_SERVER }}"
           NAME="${ACR##https://}"; NAME="${NAME%%/*}"; NAME="${NAME%%.azurecr.io}"
           az acr login --name "$NAME"
 
-      - name: Build & Push frontend
+      - name: Build & push image
         run: |
           docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest ./frontend
           docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest
 
-      - name: Deploy frontend manifest
-        run: kubectl apply -f k8s/frontend.yaml
+      - name: Deploy frontend (to chosen namespace)
+        run: kubectl apply -n "$FRONTEND_NS" -f k8s/frontend.yaml
+
+      - name: Wait for Frontend External IP
+        run: |
+          for i in $(seq 1 60); do
+            FIP=$(kubectl get svc "$FRONTEND_SVC" -n "$FRONTEND_NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            [ -n "$FIP" ] && break
+            echo "waiting for frontend LB ip... $i/60"
+            sleep 5
+          done
+          [ -n "$FIP" ] || { echo "::error::Frontend IP not assigned"; exit 1; }
+          echo "::notice:: Frontend URL: http://$FIP/"
