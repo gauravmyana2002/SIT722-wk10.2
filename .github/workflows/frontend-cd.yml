@@ -63,22 +63,26 @@ jobs:
       - name: Resolve backend IPs
         id: ips
         run: |
-          get_ip () { kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}'; }
-          P=${{ github.event.inputs.product_url }}
-          O=${{ github.event.inputs.order_url }}
-          C=${{ github.event.inputs.customer_url }}
+          get_ip () {
+          kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null
+          }
 
-          if [ -z "$P" ]; then P=$(get_ip ${PRODUCT_SVC}); fi
-          if [ -z "$O" ]; then O=$(get_ip ${ORDER_SVC}); fi
-          if [ -z "$C" ]; then C=$(get_ip ${CUSTOMER_SVC}); fi
+          PRODUCT_IP=$(get_ip product-service) || true
+          ORDER_IP=$(get_ip order-service) || true
+          CUSTOMER_IP=$(get_ip customer-service) || true
 
-          echo "PRODUCT_URL=http://$P:${PRODUCT_PORT}" >> $GITHUB_ENV
-          echo "ORDER_URL=http://$O:${ORDER_PORT}" >> $GITHUB_ENV
-          echo "CUSTOMER_URL=http://$C:${CUSTOMER_PORT}" >> $GITHUB_ENV
+          if [ -z "$PRODUCT_IP" ]; then echo "::error::Product IP not found"; exit 1; fi
+          if [ -z "$ORDER_IP" ]; then echo "::error::Order IP not found"; exit 1; fi
+          if [ -z "$CUSTOMER_IP" ]; then echo "::error::Customer IP not found"; exit 1; fi
 
-          echo "::notice:: Product API:  http://$P:${PRODUCT_PORT}"
-          echo "::notice:: Order API:    http://$O:${ORDER_PORT}"
-          echo "::notice:: Customer API: http://$C:${CUSTOMER_PORT}"
+          echo "PRODUCT_URL=http://$PRODUCT_IP:${PROD_PORT}"   >> $GITHUB_ENV
+          echo "ORDER_URL=http://$ORDER_IP:${ORD_PORT}"       >> $GITHUB_ENV
+          echo "CUSTOMER_URL=http://$CUSTOMER_IP:${CUST_PORT}" >> $GITHUB_ENV
+
+          echo "::notice:: Product  = http://$PRODUCT_IP:${PROD_PORT}"
+          echo "::notice:: Order    = http://$ORDER_IP:${ORD_PORT}"
+          echo "::notice:: Customer = http://$CUSTOMER_IP:${CUST_PORT}"
+
 
       - name: Inject API URLs into main.js
         run: |
