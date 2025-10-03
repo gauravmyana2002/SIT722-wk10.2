@@ -1,28 +1,54 @@
 name: Stage 3 - Frontend CD - Deploy to Staging
 
 on:
-  repository_dispatch:
-    types: [backend_cd_succeeded]
+  workflow_run:
+    workflows: ["Stage 2 - Backend CD - Deploy to Staging", "Backend CD", "backend-cd"]  # any that may be used
+    types: [completed]
   workflow_dispatch:
     inputs:
-      product_url:  { description: "Override Product API URL",  required: false, default: "" }
-      order_url:    { description: "Override Order API URL",    required: false, default: "" }
-      customer_url: { description: "Override Customer API URL", required: false, default: "" }  
+      aks_cluster_name:
+        description: "AKS cluster name (manual only)"
+        required: false
+        default: ""
+      aks_resource_group:
+        description: "AKS resource group (manual only)"
+        required: false
+        default: ""
+      product_url:
+        description: "Override Product API URL (http://X.X.X.X:8001)"
+        required: false
+        default: ""
+      order_url:
+        description: "Override Order API URL (http://Y.Y.Y.Y:8002)"
+        required: false
+        default: ""
+      customer_url:
+        description: "Override Customer API URL (http://Z.Z.Z.Z:8003)"
+        required: false
+        default: ""
 
 jobs:
   deploy_frontend:
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
 
     env:
+      # Frontend namespace (separate is fine; we search all namespaces for backend IPs)
+      NS: sit722-frontend-${{ github.run_id }}
+
+      # Backend service names (as defined in your k8s/*.yaml)
+      PRODUCT_SVC: product-service
+      ORDER_SVC: order-service
+      CUSTOMER_SVC: customer-service
+
+      # Public ports exposed by those Services
       PROD_PORT: "8001"
       ORD_PORT:  "8002"
       CUST_PORT: "8003"
-      FRONTEND_NS: sit722-frontend            # <- choose a stable ns for frontend
-      FRONTEND_SVC: frontend
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
@@ -30,54 +56,76 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: AKS context
-        run: az aks get-credentials --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" --name "${{ secrets.AKS_CLUSTER }}" --overwrite-existing
+        run: |
+          RG="${{ secrets.AKS_RESOURCE_GROUP }}"
+          CL="${{ secrets.AKS_CLUSTER }}"
+          # allow manual overrides
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ -n "${{ inputs.aks_resource_group }}" ] && RG="${{ inputs.aks_resource_group }}"
+            [ -n "${{ inputs.aks_cluster_name }}" ]    && CL="${{ inputs.aks_cluster_name }}"
+          fi
+          az aks get-credentials --resource-group "$RG" --name "$CL" --overwrite-existing
 
       - name: Ensure namespace
-        run: kubectl create namespace "$FRONTEND_NS" || true
-
-      # --- Resolve backend URLs (from inputs or discover across namespaces) ---
-      - name: Resolve backend URLs
-        id: urls
-        env:
-          NS: sit722-staging-${{ github.run_id }}
-          PROD_PORT: "8001"
-          ORD_PORT:  "8002"
-          CUST_PORT: "8003"
         run: |
-          # Prefer values passed from backend via repository_dispatch
-          P_IN='${{ github.event.client_payload.product_url }}'
-          O_IN='${{ github.event.client_payload.order_url }}'
-          C_IN='${{ github.event.client_payload.customer_url }}'
+          kubectl get ns "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
 
-          # Allow manual override via workflow_dispatch inputs
-          [ -n "${{ inputs.product_url }}" ]  && P_IN="${{ inputs.product_url }}"
-          [ -n "${{ inputs.order_url }}" ]    && O_IN="${{ inputs.order_url }}"
-          [ -n "${{ inputs.customer_url }}" ] && C_IN="${{ inputs.customer_url }}"
+      - name: Resolve backend IPs
+        id: ips
+        run: |
+          get_ip_any_ns () {
+            # jsonpath: search all namespaces for a service with this name
+            kubectl get svc -A -o jsonpath="{range .items[?(@.metadata.name=='$1')]}{.status.loadBalancer.ingress[0].ip}{end}"
+          }
 
-          get_ip () { kubectl get svc "$1" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null; }
+          # Use manual overrides if provided (manual run only)
+          P_IN="${{ inputs.product_url }}"
+          O_IN="${{ inputs.order_url }}"
+          C_IN="${{ inputs.customer_url }}"
 
-          if [ -z "$P_IN" ]; then P_IN="http://$(get_ip product-service):${PROD_PORT}"; fi
-          if [ -z "$O_IN" ]; then O_IN="http://$(get_ip order-service):${ORD_PORT}";   fi
-          if [ -z "$C_IN" ]; then C_IN="http://$(get_ip customer-service):${CUST_PORT}"; fi
+          if [ -n "$P_IN" ] && [ -n "$O_IN" ] && [ -n "$C_IN" ]; then
+            PRODUCT_URL="$P_IN"; ORDER_URL="$O_IN"; CUSTOMER_URL="$C_IN"
+          else
+            # Poll for IPs (max ~5 min)
+            for i in $(seq 1 60); do
+              P_IP="$(get_ip_any_ns ${PRODUCT_SVC})"
+              O_IP="$(get_ip_any_ns ${ORDER_SVC})"
+              C_IP="$(get_ip_any_ns ${CUSTOMER_SVC})"
+              if [ -n "$P_IP" ] && [ -n "$O_IP" ] && [ -n "$C_IP" ]; then
+                break
+              fi
+              echo "Waiting for backend LoadBalancer IPs... attempt $i"
+              sleep 5
+            done
+            [ -n "$P_IP" ] || { echo "::error::Product IP not found"; exit 1; }
+            [ -n "$O_IP" ] || { echo "::error::Order IP not found"; exit 1; }
+            [ -n "$C_IP" ] || { echo "::error::Customer IP not found"; exit 1; }
 
-          echo "PRODUCT_URL=$P_IN"  >> $GITHUB_ENV
-          echo "ORDER_URL=$O_IN"    >> $GITHUB_ENV
-          echo "CUSTOMER_URL=$C_IN" >> $GITHUB_ENV
-          echo "::notice::Product  $P_IN"
-          echo "::notice::Order    $O_IN"
-          echo "::notice::Customer $C_IN"
+            PRODUCT_URL="http://${P_IP}:${PROD_PORT}"
+            ORDER_URL="http://${O_IP}:${ORD_PORT}"
+            CUSTOMER_URL="http://${C_IP}:${CUST_PORT}"
+          fi
+
+          echo "PRODUCT_URL=$PRODUCT_URL"   >> $GITHUB_ENV
+          echo "ORDER_URL=$ORDER_URL"       >> $GITHUB_ENV
+          echo "CUSTOMER_URL=$CUSTOMER_URL" >> $GITHUB_ENV
+          echo "::notice:: Product  API: $PRODUCT_URL"
+          echo "::notice:: Order    API: $ORDER_URL"
+          echo "::notice:: Customer API: $CUSTOMER_URL"
 
       - name: Inject API URLs into main.js
         run: |
-          sed -i "s|_PRODUCT_API_URL_|${PRODUCT_URL}|g"  frontend/main.js
-          sed -i "s|_ORDER_API_URL_|${ORDER_URL}|g"      frontend/main.js
+          sed -i "s|_PRODUCT_API_URL_|${PRODUCT_URL}|g"   frontend/main.js
+          sed -i "s|_ORDER_API_URL_|${ORDER_URL}|g"       frontend/main.js
           sed -i "s|_CUSTOMER_API_URL_|${CUSTOMER_URL}|g" frontend/main.js
+
+          echo "--- main.js preview (first 30 lines) ---"
           head -n 30 frontend/main.js
 
       - name: ACR login
         run: |
-          ACR="${{ secrets.ACR_LOGIN_SERVER }}"
-          NAME="${ACR##https://}"; NAME="${NAME%%/*}"; NAME="${NAME%%.azurecr.io}"
+          REG="${{ secrets.ACR_LOGIN_SERVER }}"
+          NAME="${REG##https://}"; NAME="${NAME%%/*}"; NAME="${NAME%%.azurecr.io}"
           az acr login --name "$NAME"
 
       - name: Build & push image
@@ -85,16 +133,19 @@ jobs:
           docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest ./frontend
           docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest
 
-      - name: Deploy frontend (to chosen namespace)
-        run: kubectl apply -n "$FRONTEND_NS" -f k8s/frontend.yaml
+      - name: Deploy frontend
+        run: |
+          kubectl apply -n "$NS" -f k8s/frontend.yaml
+          echo "--- resources in $NS ---"
+          kubectl get deploy,svc,pod -n "$NS" -o wide || true
 
-      - name: Wait for Frontend External IP
+      - name: Wait for frontend LoadBalancer IP
         run: |
           for i in $(seq 1 60); do
-            FIP=$(kubectl get svc "$FRONTEND_SVC" -n "$FRONTEND_NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            FIP=$(kubectl get svc frontend -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
             [ -n "$FIP" ] && break
-            echo "waiting for frontend LB ip... $i/60"
+            echo "Waiting for frontend LB IP... attempt $i"
             sleep 5
           done
           [ -n "$FIP" ] || { echo "::error::Frontend IP not assigned"; exit 1; }
-          echo "::notice:: Frontend URL: http://$FIP/"
+          echo "::notice:: Frontend URL: http://$FIP"
