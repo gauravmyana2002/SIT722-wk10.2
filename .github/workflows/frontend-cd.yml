@@ -60,49 +60,48 @@ jobs:
         run: |
           kubectl get ns "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
 
-      - name: Resolve backend endpoints and set quoted URLs
+      - name: Resolve backend endpoints (payload > manual > discovery)
         id: resolve
         shell: bash
         run: |
           set -euo pipefail
+          trim_slash(){ printf "%s" "${1%/}"; }
 
-          trim_slash () { printf "%s" "${1%/}"; }
-
-          # 1) Prefer repository_dispatch payload (backend CD sends product_url/order_url/customer_url)
+          # 1) prefer repository_dispatch payload
           P_IN="${{ github.event.client_payload.product_url || '' }}"
           O_IN="${{ github.event.client_payload.order_url   || '' }}"
           C_IN="${{ github.event.client_payload.customer_url|| '' }}"
 
-          # 2) Allow manual workflow_dispatch overrides
+          # 2) manual overrides (workflow_dispatch inputs)
           [ -z "$P_IN" ] && P_IN="${{ inputs.product_url || '' }}"
           [ -z "$O_IN" ] && O_IN="${{ inputs.order_url   || '' }}"
           [ -z "$C_IN" ] && C_IN="${{ inputs.customer_url|| '' }}"
 
-          if [[ -n "$P_IN$O_IN$C_IN" ]]; then
-            # inject exact roots, quoted so main.js receives "http://X.X.X.X:8001"
-            P_Q=$(trim_slash "$P_IN")
-            O_Q=$(trim_slash "$O_IN")
-            C_Q=$(trim_slash "$C_IN")
-            echo "PRODUCT_URL=\"${P_Q}\""   >> "$GITHUB_ENV"
-            echo "ORDER_URL=\"${O_Q}\""     >> "$GITHUB_ENV"
-            echo "CUSTOMER_URL=\"${C_Q}\""  >> "$GITHUB_ENV"
-            echo "::notice::Using provided URLs (quoted): ${P_Q} ${O_Q} ${C_Q}"
+          if [[ -n "${P_IN}${O_IN}${C_IN}" ]]; then
+            P_BASE="$(trim_slash "$P_IN")"
+            O_BASE="$(trim_slash "$O_IN")"
+            C_BASE="$(trim_slash "$C_IN")"
+            # WRITE UNQUOTED VALUES (no surrounding quotes)
+            echo "PRODUCT_URL=${P_BASE}"   >> "$GITHUB_ENV"
+            echo "ORDER_URL=${O_BASE}"     >> "$GITHUB_ENV"
+            echo "CUSTOMER_URL=${C_BASE}"  >> "$GITHUB_ENV"
+            echo "::notice::Using provided backend roots: ${P_BASE} ${O_BASE} ${C_BASE}"
             exit 0
           fi
 
-          # 3) Fallback discovery across namespaces (only if backends still exist)
-          need_ns () { kubectl get svc -A | awk -v n="$1" '$2==n{print $1; exit}'; }
-          get_ep () { kubectl get svc "$2" -n "$1" -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}'; }
+          # 3) fallback discovery across namespaces
+          need_ns(){ kubectl get svc -A | awk -v n="$1" '$2==n{print $1; exit}'; }
+          get_ep(){ kubectl get svc "$2" -n "$1" -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}'; }
 
-          P_NS=$(need_ns "${PRODUCT_SVC}") || { echo "::error::${PRODUCT_SVC} not found"; exit 1; }
-          O_NS=$(need_ns "${ORDER_SVC}")   || { echo "::error::${ORDER_SVC} not found"; exit 1; }
-          C_NS=$(need_ns "${CUSTOMER_SVC}")|| { echo "::error::${CUSTOMER_SVC} not found"; exit 1; }
+          P_NS=$(need_ns "${PRODUCT_SVC}")   || { echo "::error::${PRODUCT_SVC} not found"; exit 1; }
+          O_NS=$(need_ns "${ORDER_SVC}")     || { echo "::error::${ORDER_SVC} not found"; exit 1; }
+          C_NS=$(need_ns "${CUSTOMER_SVC}")  || { echo "::error::${CUSTOMER_SVC} not found"; exit 1; }
 
           P_EP=""; O_EP=""; C_EP=""
           for i in $(seq 1 120); do
-            P_EP=$(get_ep "$P_NS" "${PRODUCT_SVC}") || true
-            O_EP=$(get_ep "$O_NS" "${ORDER_SVC}")   || true
-            C_EP=$(get_ep "$C_NS" "${CUSTOMER_SVC}")|| true
+            P_EP=$(get_ep "$P_NS" "${PRODUCT_SVC}")   || true
+            O_EP=$(get_ep "$O_NS" "${ORDER_SVC}")     || true
+            C_EP=$(get_ep "$C_NS" "${CUSTOMER_SVC}")  || true
             if [[ -n "$P_EP" && -n "$O_EP" && -n "$C_EP" ]]; then break; fi
             echo "Waiting for backend LB endpoints... attempt $i"
             sleep 5
@@ -114,25 +113,45 @@ jobs:
             exit 1
           fi
 
-          # build root URLs and store quoted values in GITHUB_ENV
-          echo "PRODUCT_URL=\"http://${P_EP}:${PROD_PORT}\""   >> "$GITHUB_ENV"
-          echo "ORDER_URL=\"http://${O_EP}:${ORD_PORT}\""       >> "$GITHUB_ENV"
-          echo "CUSTOMER_URL=\"http://${C_EP}:${CUST_PORT}\""   >> "$GITHUB_ENV"
+          # store plain root URLs (no extra quotes)
+          echo "PRODUCT_URL=http://${P_EP}:${PROD_PORT}"   >> "$GITHUB_ENV"
+          echo "ORDER_URL=http://${O_EP}:${ORD_PORT}"      >> "$GITHUB_ENV"
+          echo "CUSTOMER_URL=http://${C_EP}:${CUST_PORT}"  >> "$GITHUB_ENV"
 
-          echo "::notice::Resolved (quoted) Product=${PRODUCT_URL:-}"
-          echo "::notice::Resolved (quoted) Order=${ORDER_URL:-}"
-          echo "::notice::Resolved (quoted) Customer=${CUSTOMER_URL:-}"
+          echo "::notice::Resolved Product=${PRODUCT_URL:-}"
+          echo "::notice::Resolved Order=${ORDER_URL:-}"
+          echo "::notice::Resolved Customer=${CUSTOMER_URL:-}"
 
-      - name: Inject API URLs into frontend/main.js
+      - name: Inject API URLs into frontend/main.js and sanitize patterns
+        shell: bash
         run: |
-          # Replace placeholders in main.js with quoted root URLs.
-          # main.js must contain placeholders: _PRODUCT_API_URL_ _ORDER_API_URL_ _CUSTOMER_API_URL_
+          set -euo pipefail
+
+          # Ensure placeholders are inside JS quotes so sed produces valid string literals.
+          sed -i 's|const PRODUCT_API_BASE_URL *= *.*|const PRODUCT_API_BASE_URL = "_PRODUCT_API_URL_";|' frontend/main.js || true
+          sed -i 's|const ORDER_API_BASE_URL *= *.*|const ORDER_API_BASE_URL = "_ORDER_API_URL_";|' frontend/main.js || true
+          sed -i 's|const CUSTOMER_API_BASE_URL *= *.*|const CUSTOMER_API_BASE_URL = "_CUSTOMER_API_BASE_URL_";|' frontend/main.js || true
+
+          # Replace placeholders with the plain root URLs.
           sed -i "s|_PRODUCT_API_URL_|${PRODUCT_URL}|g"   frontend/main.js
           sed -i "s|_ORDER_API_URL_|${ORDER_URL}|g"       frontend/main.js
           sed -i "s|_CUSTOMER_API_URL_|${CUSTOMER_URL}|g" frontend/main.js
 
-          echo "--- main.js preview (first 30 lines) ---"
-          head -n 30 frontend/main.js
+          # Conservative sanitization: prevent building relative paths under frontend host.
+          sed -i "s|\${window.location.origin}/\${PRODUCT_API_BASE_URL}|\${PRODUCT_API_BASE_URL}|g" frontend/main.js || true
+          sed -i "s|\${window.location.origin}/\${ORDER_API_BASE_URL}|\${ORDER_API_BASE_URL}|g" frontend/main.js || true
+          sed -i "s|\${window.location.origin}/\${CUSTOMER_API_BASE_URL}|\${CUSTOMER_API_BASE_URL}|g" frontend.main.js || true || true
+
+          sed -i "s|window.location.origin + '/' + PRODUCT_API_BASE_URL|PRODUCT_API_BASE_URL|g" frontend/main.js || true
+          sed -i "s|window.location.origin + '/' + ORDER_API_BASE_URL|ORDER_API_BASE_URL|g" frontend/main.js || true
+          sed -i "s|window.location.origin + '/' + CUSTOMER_API_BASE_URL|CUSTOMER_API_BASE_URL|g" frontend/main.js || true
+
+          sed -i "s|fetch('/' + PRODUCT_API_BASE_URL|fetch(PRODUCT_API_BASE_URL|g" frontend/main.js || true
+          sed -i "s|fetch('/' + ORDER_API_BASE_URL|fetch(ORDER_API_BASE_URL|g" frontend/main.js || true
+          sed -i "s|fetch('/' + CUSTOMER_API_BASE_URL|fetch(CUSTOMER_API_BASE_URL|g" frontend/main.js || true
+
+          echo "--- main.js preview (first 40 lines) ---"
+          head -n 40 frontend/main.js
 
       - name: ACR login
         run: |
