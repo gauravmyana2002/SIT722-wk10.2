@@ -2,7 +2,7 @@ name: Stage 3 - Frontend CD - Deploy to Staging
 
 on:
   workflow_run:
-    workflows: ["Stage 2 - Backend CD - Deploy to Staging", "Backend CD", "backend-cd"]  # any that may be used
+    workflows: ["Stage 2 - Backend CD - Deploy to Staging", "Backend CD", "backend-cd"]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -33,17 +33,12 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Frontend namespace (separate is fine; we search all namespaces for backend IPs)
       NS: sit722-frontend-${{ github.run_id }}
-
-      # Backend service names (as defined in your k8s/*.yaml)
       PRODUCT_SVC: product-service
       ORDER_SVC: order-service
       CUSTOMER_SVC: customer-service
-
-      # Public ports exposed by those Services
       PROD_PORT: "8001"
-      ORD_PORT:  "8002"
+      ORD_PORT: "8002"
       CUST_PORT: "8003"
 
     steps:
@@ -59,7 +54,6 @@ jobs:
         run: |
           RG="${{ secrets.AKS_RESOURCE_GROUP }}"
           CL="${{ secrets.AKS_CLUSTER }}"
-          # allow manual overrides
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             [ -n "${{ inputs.aks_resource_group }}" ] && RG="${{ inputs.aks_resource_group }}"
             [ -n "${{ inputs.aks_cluster_name }}" ]    && CL="${{ inputs.aks_cluster_name }}"
@@ -72,54 +66,61 @@ jobs:
 
       - name: Resolve backend IPs
         id: ips
+        shell: bash
         run: |
-          get_ip_any_ns () {
-            # jsonpath: search all namespaces for a service with this name
-            kubectl get svc -A -o jsonpath="{range .items[?(@.metadata.name=='$1')]}{.status.loadBalancer.ingress[0].ip}{end}"
+          set -euo pipefail
+
+          need_svc () {
+            local name="$1"
+            if ! kubectl get svc -A | awk -v n="$name" '$2==n{found=1} END{exit !found}'; then
+              echo "::error::Service $name not found in any namespace"; exit 1
+            fi
+            local typ ns
+            typ=$(kubectl get svc -A | awk -v n="$name" '$2==n{print $4; exit}')
+            ns=$(kubectl get svc -A | awk -v n="$name" '$2==n{print $1; exit}')
+            if [[ "$typ" != "LoadBalancer" ]]; then
+              echo "::error::Service $name is not LoadBalancer (is $typ)"; exit 1
+            fi
+            echo "$ns"
           }
 
-          # Use manual overrides if provided (manual run only)
-          P_IN="${{ inputs.product_url }}"
-          O_IN="${{ inputs.order_url }}"
-          C_IN="${{ inputs.customer_url }}"
+          P_NS=$(need_svc "${PRODUCT_SVC}")
+          O_NS=$(need_svc "${ORDER_SVC}")
+          C_NS=$(need_svc "${CUSTOMER_SVC}")
 
-          if [ -n "$P_IN" ] && [ -n "$O_IN" ] && [ -n "$C_IN" ]; then
-            PRODUCT_URL="$P_IN"; ORDER_URL="$O_IN"; CUSTOMER_URL="$C_IN"
-          else
-            # Poll for IPs (max ~5 min)
-            for i in $(seq 1 60); do
-              P_IP="$(get_ip_any_ns ${PRODUCT_SVC})"
-              O_IP="$(get_ip_any_ns ${ORDER_SVC})"
-              C_IP="$(get_ip_any_ns ${CUSTOMER_SVC})"
-              if [ -n "$P_IP" ] && [ -n "$O_IP" ] && [ -n "$C_IP" ]; then
-                break
-              fi
-              echo "Waiting for backend LoadBalancer IPs... attempt $i"
-              sleep 5
-            done
-            [ -n "$P_IP" ] || { echo "::error::Product IP not found"; exit 1; }
-            [ -n "$O_IP" ] || { echo "::error::Order IP not found"; exit 1; }
-            [ -n "$C_IP" ] || { echo "::error::Customer IP not found"; exit 1; }
+          get_lb_endpoint () {
+            local ns="$1" svc="$2"
+            kubectl get svc "$svc" -n "$ns" -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}'
+          }
 
-            PRODUCT_URL="http://${P_IP}:${PROD_PORT}"
-            ORDER_URL="http://${O_IP}:${ORD_PORT}"
-            CUSTOMER_URL="http://${C_IP}:${CUST_PORT}"
+          for i in $(seq 1 120); do
+            P_EP=$(get_lb_endpoint "$P_NS" "${PRODUCT_SVC}") || true
+            O_EP=$(get_lb_endpoint "$O_NS" "${ORDER_SVC}")   || true
+            C_EP=$(get_lb_endpoint "$C_NS" "${CUSTOMER_SVC}")|| true
+            if [[ -n "${P_EP}" && -n "${O_EP}" && -n "${C_EP}" ]]; then
+              break
+            fi
+            echo "Waiting for backend LoadBalancer endpoints... attempt $i"
+            sleep 5
+          done
+
+          if [[ -z "${P_EP:-}" || -z "${O_EP:-}" || -z "${C_EP:-}" ]]; then
+            echo "::error::Timed out waiting for LoadBalancer endpoints"; exit 1
           fi
 
-          echo "PRODUCT_URL=$PRODUCT_URL"   >> $GITHUB_ENV
-          echo "ORDER_URL=$ORDER_URL"       >> $GITHUB_ENV
-          echo "CUSTOMER_URL=$CUSTOMER_URL" >> $GITHUB_ENV
-          echo "::notice:: Product  API: $PRODUCT_URL"
-          echo "::notice:: Order    API: $ORDER_URL"
-          echo "::notice:: Customer API: $CUSTOMER_URL"
+          echo "PRODUCT_URL=http://${P_EP}:${PROD_PORT}/products"   >> $GITHUB_ENV
+          echo "ORDER_URL=http://${O_EP}:${ORD_PORT}/orders"        >> $GITHUB_ENV
+          echo "CUSTOMER_URL=http://${C_EP}:${CUST_PORT}/customers" >> $GITHUB_ENV
+
+          echo "::notice:: Product API: http://${P_EP}:${PROD_PORT}/products"
+          echo "::notice:: Order API:   http://${O_EP}:${ORD_PORT}/orders"
+          echo "::notice:: Customer API:http://${C_EP}:${CUST_PORT}/customers"
 
       - name: Inject API URLs into main.js
         run: |
           sed -i "s|_PRODUCT_API_URL_|${PRODUCT_URL}|g"   frontend/main.js
           sed -i "s|_ORDER_API_URL_|${ORDER_URL}|g"       frontend/main.js
           sed -i "s|_CUSTOMER_API_URL_|${CUSTOMER_URL}|g" frontend/main.js
-
-          echo "--- main.js preview (first 30 lines) ---"
           head -n 30 frontend/main.js
 
       - name: ACR login
@@ -136,13 +137,12 @@ jobs:
       - name: Deploy frontend
         run: |
           kubectl apply -n "$NS" -f k8s/frontend.yaml
-          echo "--- resources in $NS ---"
           kubectl get deploy,svc,pod -n "$NS" -o wide || true
 
       - name: Wait for frontend LoadBalancer IP
         run: |
           for i in $(seq 1 60); do
-            FIP=$(kubectl get svc frontend -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            FIP=$(kubectl get svc frontend -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
             [ -n "$FIP" ] && break
             echo "Waiting for frontend LB IP... attempt $i"
             sleep 5
