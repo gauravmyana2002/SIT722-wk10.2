@@ -8,6 +8,11 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Required so the workflow token can call repository_dispatch.
+    # This does not change deployment behaviour.
+    permissions:
+      contents: write
+
     env:
       NS: sit722-staging-${{ github.run_id }}
 
@@ -60,6 +65,7 @@ jobs:
 
       - name: Wait for Deployments to roll out
         run: |
+          # NOTE: Names here must match your deployment manifests.
           for d in product-service-w10e1 order-service-w10e1 customer-service-w10e1; do
             echo "Waiting for rollout of $d"
             kubectl rollout status deploy/$d -n "$NS" --timeout=300s || exit 1
@@ -67,6 +73,7 @@ jobs:
 
       - name: Wait for Backend LoadBalancer IPs
         run: |
+          # NOTE: Reads the external IPs from the three Services in this run's namespace.
           PRODUCT_IP=""; ORDER_IP=""; CUSTOMER_IP=""
           for i in $(seq 1 60); do
             echo "Attempt $i/60 to get IPs..."
@@ -97,8 +104,11 @@ jobs:
       - name: Trigger Frontend CD
         if: ${{ success() }}
         run: |
+          # NOTE: repository_dispatch kicks off the Frontend CD in the same repo.
+          # NOTE: github.token inherits the job's permissions above.
+          echo "Dispatching frontend_cd_succeeded with backend URLs..."
           curl -sSL -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer ${{ github.token }}" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/${{ github.repository }}/dispatches \
             -d "$(jq -n \
@@ -106,3 +116,4 @@ jobs:
               --arg ou "http://${{ env.ORDER_IP }}:8002" \
               --arg cu "http://${{ env.CUSTOMER_IP }}:8003" \
               '{event_type:"backend_cd_succeeded", client_payload:{product_url:$pu, order_url:$ou, customer_url:$cu}}')"
+          echo "Dispatched."
